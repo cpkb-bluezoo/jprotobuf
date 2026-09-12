@@ -7,9 +7,22 @@ binary wire format](https://protobuf.dev/programming-guides/encoding/). It
 implements the four wire types (varint, 64-bit, length-delimited, 32-bit)
 without generated message classes or a runtime dependency on `protobuf-java`.
 
+Unlike `protobuf-java`, which typically materialises an entire decoded message
+as an object graph in memory, jprotobuf uses a **push parser** that delivers
+one field at a time to a `ProtobufHandler`. The library keeps only fixed parser
+state (nesting depth, underflow position); it does not allocate a tree of maps,
+lists, or generated message objects. If your handler processes each field and
+moves on — writing to a channel, updating counters, filtering — memory stays
+**bounded by your I/O buffer**, not by message size.
+
+The jar itself is tiny (~14 KB), with no transitive dependencies.
+
 ## Features
 
 - **Pure Java** — no external dependencies
+- **Tiny** — ~14 KB jar; no `protobuf-java` runtime
+- **Constant-memory parsing** — event-driven; no object graph materialised by
+  the library (contrast with generated `parseFrom()` / `mergeFrom()` usage)
 - **NIO-first** — `ByteBuffer` and `WritableByteChannel`; no `InputStream` / `OutputStream`
 - **Event-driven parser** — push bytes via `receive(ByteBuffer)`; receive decoded
   fields through a `ProtobufHandler`
