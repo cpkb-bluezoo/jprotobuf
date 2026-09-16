@@ -36,7 +36,7 @@ import java.util.ResourceBundle;
  * the buffer position is left unchanged (at the start of the incomplete
  * field) and the parser enters an underflow state.
  *
- * <h3>Usage</h3>
+ * <h2>Usage</h2>
  * <pre>
  * ProtobufHandler handler = new MyHandler();
  * ProtobufParser parser = new ProtobufParser(handler);

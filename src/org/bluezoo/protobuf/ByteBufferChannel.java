@@ -74,6 +74,7 @@ public class ByteBufferChannel implements WritableByteChannel {
      *
      * @param leadingReserve bytes to skip before the first payload write
      * @param initialPayloadCapacity initial capacity for the payload region
+     * @return the new channel
      */
     public static ByteBufferChannel withLeadingReserve(int leadingReserve,
             int initialPayloadCapacity) {
@@ -157,6 +158,8 @@ public class ByteBufferChannel implements WritableByteChannel {
     /**
      * Returns the number of payload bytes written so far, excluding any
      * leading reserve configured at creation.
+     *
+     * @return the payload byte count
      */
     public int payloadLength() {
         return buffer.position() - leadingReserve;

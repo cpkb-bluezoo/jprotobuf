@@ -30,7 +30,7 @@ import java.nio.ByteBuffer;
  * wire format. The handler is responsible for interpreting the values based
  * on schema knowledge.
  *
- * <h3>Wire Type to Handler Method Mapping</h3>
+ * <h2>Wire Type to Handler Method Mapping</h2>
  * <ul>
  *   <li>VARINT (0) → {@link #handleVarint(int, long)}</li>
  *   <li>I64 (1) → {@link #handleFixed64(int, long)}</li>
@@ -39,7 +39,7 @@ import java.nio.ByteBuffer;
  *   <li>I32 (5) → {@link #handleFixed32(int, int)}</li>
  * </ul>
  *
- * <h3>Value Interpretation</h3>
+ * <h2>Value Interpretation</h2>
  * <p>The handler must interpret raw wire values according to the schema:
  * <ul>
  *   <li>Varint → int32, int64, uint32, uint64, sint32 (zigzag), sint64 (zigzag), bool, enum</li>

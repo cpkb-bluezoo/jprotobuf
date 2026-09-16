@@ -34,6 +34,12 @@ import java.nio.charset.StandardCharsets;
  */
 public class DefaultProtobufHandler implements ProtobufHandler {
 
+    /**
+     * Creates a new handler with all no-op default behavior.
+     */
+    public DefaultProtobufHandler() {
+    }
+
     @Override
     public void handleVarint(int fieldNumber, long value) {
         // No-op by default
