@@ -17,6 +17,8 @@ moves on — writing to a channel, updating counters, filtering — memory stays
 
 The jar itself is tiny (~14 KB), with no transitive dependencies.
 
+**[View API documentation online](https://cpkb-bluezoo.github.io/jprotobuf/doc/)**
+
 ## Features
 
 - **Pure Java** — no external dependencies

@@ -57,21 +57,38 @@
     </jar>
   </target>
 
+  <!-- Exclude module-info.java so Javadoc runs in classpath mode (see gumdrop). -->
   <target name="javadoc">
     <mkdir dir="${doc}"/>
-    <javadoc sourcepath="${src}" destdir="${doc}"
-             source="${java.source.version}"/>
+    <javadoc destdir="${doc}"
+             author="true"
+             version="true"
+             use="true"
+             windowtitle="jprotobuf API"
+             doctitle="jprotobuf API Documentation"
+             source="${java.source.version}"
+             failonerror="false"
+             additionalparam="-Xdoclint:none">
+      <fileset dir="${src}" includes="**/*.java" excludes="module-info.java"/>
+    </javadoc>
   </target>
+
+  <target name="clean-javadoc" description="Remove generated Javadoc">
+    <delete dir="${doc}"/>
+  </target>
+
+  <target name="javadoc-force" depends="clean-javadoc,javadoc"
+          description="Force complete regeneration of Javadoc (for CI)"/>
 
   <target name="release-javadoc" depends="javadoc">
     <mkdir dir="${dist}"/>
     <jar jarfile="${dist}/jprotobuf-${release}-javadoc.jar" basedir="${doc}"/>
   </target>
 
+  <!-- Does not delete doc/ — use clean-javadoc or javadoc-force to regenerate API docs. -->
   <target name="clean">
     <delete dir="${build}"/>
     <delete dir="${dist}"/>
-    <delete dir="${doc}"/>
   </target>
 
   <target name="clean-junit">
