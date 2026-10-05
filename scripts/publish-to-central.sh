@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Builds, signs, bundles, and uploads a release to Maven Central's Publisher
-# API. The single canonical implementation of this process - both the
-# release-to-maven-central.yml workflow and a maintainer running this by
-# hand locally call this same script, so there is exactly one place that
-# knows how to do this, not two copies that can drift apart.
+# API. The single canonical implementation of this process - the Publish
+# release workflow and a maintainer running this by hand locally call this
+# same script. For GitHub Packages, run scripts/publish-to-github-packages.sh
+# afterward (CI does both in one workflow).
 #
 # Usage:
 #   GPG_KEY_ID=27196849F242508A \

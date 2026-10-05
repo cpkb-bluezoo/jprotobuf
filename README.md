@@ -64,6 +64,10 @@ parser.close();
 
 ## Maven
 
+Artifacts are published to [Maven Central](https://central.sonatype.com/) and
+[GitHub Packages](https://github.com/cpkb-bluezoo/jprotobuf/packages) (same
+coordinates; GitHub requires authentication to resolve).
+
 ```xml
 <dependency>
     <groupId>org.bluezoo</groupId>
