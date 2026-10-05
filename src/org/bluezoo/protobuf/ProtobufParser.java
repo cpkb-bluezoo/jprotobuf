@@ -22,9 +22,8 @@
 package org.bluezoo.protobuf;
 
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.text.MessageFormat;
-import java.util.ArrayDeque;
-import java.util.Deque;
 import java.util.ResourceBundle;
 
 /**
@@ -84,8 +83,9 @@ public class ProtobufParser {
 
     private final ProtobufHandler handler;
 
-    // Message nesting - tracks remaining bytes at each level
-    private final Deque<Integer> messageStack = new ArrayDeque<>();
+    // Message nesting - remaining payload bytes at each level (primitive stack)
+    private int[] messageRemaining = new int[4];
+    private int messageDepth;
 
     // Underflow state
     private boolean underflow;
@@ -132,8 +132,8 @@ public class ProtobufParser {
 
         while (data.hasRemaining()) {
             // Check if we've completed any nested messages
-            while (!messageStack.isEmpty() && messageStack.peek() <= 0) {
-                messageStack.pop();
+            while (messageDepth > 0 && messageRemaining[messageDepth - 1] <= 0) {
+                messageDepth--;
                 handler.endMessage();
             }
 
@@ -225,7 +225,7 @@ public class ProtobufParser {
                         decrementMessageBytes(bytesConsumed);
                         bytesConsumed = 0; // Already decremented, don't do it again below
                         handler.startMessage(fieldNumber);
-                        messageStack.push(length);
+                        pushMessageRemaining(length);
                     } else {
                         // Bytes/string - need all content available
                         if (data.remaining() < length) {
@@ -257,8 +257,8 @@ public class ProtobufParser {
         }
 
         // Check for any completed messages at the end
-        while (!messageStack.isEmpty() && messageStack.peek() <= 0) {
-            messageStack.pop();
+        while (messageDepth > 0 && messageRemaining[messageDepth - 1] <= 0) {
+            messageDepth--;
             handler.endMessage();
         }
     }
@@ -272,9 +272,9 @@ public class ProtobufParser {
         if (underflow) {
             throw new ProtobufParseException(L10N.getString("err.incomplete_field"));
         }
-        if (!messageStack.isEmpty()) {
+        if (messageDepth > 0) {
             String msg = MessageFormat.format(
-                    L10N.getString("err.unclosed_messages"), messageStack.size());
+                    L10N.getString("err.unclosed_messages"), messageDepth);
             throw new ProtobufParseException(msg);
         }
     }
@@ -285,7 +285,7 @@ public class ProtobufParser {
      * <p>Call this to reuse the parser for a new independent message.
      */
     public void reset() {
-        messageStack.clear();
+        messageDepth = 0;
         underflow = false;
     }
 
@@ -331,10 +331,10 @@ public class ProtobufParser {
      * Caller must ensure 8 bytes are available.
      */
     private long readFixed64(ByteBuffer data) {
-        long result = 0;
-        for (int i = 0; i < 8; i++) {
-            result |= ((long) (data.get() & 0xFF)) << (i * 8);
-        }
+        ByteOrder prev = data.order();
+        data.order(ByteOrder.LITTLE_ENDIAN);
+        long result = data.getLong();
+        data.order(prev);
         return result;
     }
 
@@ -343,11 +343,20 @@ public class ProtobufParser {
      * Caller must ensure 4 bytes are available.
      */
     private int readFixed32(ByteBuffer data) {
-        int result = 0;
-        for (int i = 0; i < 4; i++) {
-            result |= (data.get() & 0xFF) << (i * 8);
-        }
+        ByteOrder prev = data.order();
+        data.order(ByteOrder.LITTLE_ENDIAN);
+        int result = data.getInt();
+        data.order(prev);
         return result;
+    }
+
+    private void pushMessageRemaining(int length) {
+        if (messageDepth == messageRemaining.length) {
+            int[] grown = new int[messageDepth * 2];
+            System.arraycopy(messageRemaining, 0, grown, 0, messageDepth);
+            messageRemaining = grown;
+        }
+        messageRemaining[messageDepth++] = length;
     }
 
     /**
@@ -355,18 +364,11 @@ public class ProtobufParser {
      * When bytes are consumed, they count against all enclosing message boundaries.
      */
     private void decrementMessageBytes(int count) {
-        if (messageStack.isEmpty() || count == 0) {
+        if (messageDepth == 0 || count == 0) {
             return;
         }
-        
-        // Decrement all levels - use temporary array to modify
-        Integer[] levels = messageStack.toArray(new Integer[0]);
-        messageStack.clear();
-        for (int i = 0; i < levels.length; i++) {
-            levels[i] = levels[i] - count;
-        }
-        for (Integer level : levels) {
-            messageStack.addLast(level);
+        for (int i = 0; i < messageDepth; i++) {
+            messageRemaining[i] -= count;
         }
     }
 }

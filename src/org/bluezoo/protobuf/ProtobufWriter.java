@@ -77,7 +77,8 @@ public class ProtobufWriter {
      */
     public ProtobufWriter(WritableByteChannel channel) {
         this.channel = channel;
-        this.writeBuffer = ByteBuffer.allocate(16); // Enough for any single primitive
+        // Tag (up to 10 bytes) + value (varint up to 10, or 8-byte fixed)
+        this.writeBuffer = ByteBuffer.allocate(24);
         this.bytesWritten = 0;
     }
 
@@ -119,16 +120,8 @@ public class ProtobufWriter {
      */
     public void writeVarint(long value) throws IOException {
         writeBuffer.clear();
-        while (true) {
-            if ((value & ~0x7FL) == 0) {
-                writeBuffer.put((byte) value);
-                break;
-            }
-            writeBuffer.put((byte) ((value & 0x7F) | 0x80));
-            value >>>= 7;
-        }
-        writeBuffer.flip();
-        writeToChannel(writeBuffer);
+        putVarint(writeBuffer, value);
+        flushWriteBuffer();
     }
 
     /**
@@ -164,16 +157,8 @@ public class ProtobufWriter {
      */
     public void writeFixed64(long value) throws IOException {
         writeBuffer.clear();
-        writeBuffer.put((byte) (value & 0xFF));
-        writeBuffer.put((byte) ((value >> 8) & 0xFF));
-        writeBuffer.put((byte) ((value >> 16) & 0xFF));
-        writeBuffer.put((byte) ((value >> 24) & 0xFF));
-        writeBuffer.put((byte) ((value >> 32) & 0xFF));
-        writeBuffer.put((byte) ((value >> 40) & 0xFF));
-        writeBuffer.put((byte) ((value >> 48) & 0xFF));
-        writeBuffer.put((byte) ((value >> 56) & 0xFF));
-        writeBuffer.flip();
-        writeToChannel(writeBuffer);
+        putFixed64(writeBuffer, value);
+        flushWriteBuffer();
     }
 
     /**
@@ -184,12 +169,8 @@ public class ProtobufWriter {
      */
     public void writeFixed32(int value) throws IOException {
         writeBuffer.clear();
-        writeBuffer.put((byte) (value & 0xFF));
-        writeBuffer.put((byte) ((value >> 8) & 0xFF));
-        writeBuffer.put((byte) ((value >> 16) & 0xFF));
-        writeBuffer.put((byte) ((value >> 24) & 0xFF));
-        writeBuffer.flip();
-        writeToChannel(writeBuffer);
+        putFixed32(writeBuffer, value);
+        flushWriteBuffer();
     }
 
     /**
@@ -224,8 +205,10 @@ public class ProtobufWriter {
      * @throws IOException if an I/O error occurs
      */
     public void writeVarintField(int fieldNumber, long value) throws IOException {
-        writeTag(fieldNumber, WIRETYPE_VARINT);
-        writeVarint(value);
+        writeBuffer.clear();
+        putTag(writeBuffer, fieldNumber, WIRETYPE_VARINT);
+        putVarint(writeBuffer, value);
+        flushWriteBuffer();
     }
 
     /**
@@ -236,8 +219,10 @@ public class ProtobufWriter {
      * @throws IOException if an I/O error occurs
      */
     public void writeSVarintField(int fieldNumber, long value) throws IOException {
-        writeTag(fieldNumber, WIRETYPE_VARINT);
-        writeSVarint(value);
+        writeBuffer.clear();
+        putTag(writeBuffer, fieldNumber, WIRETYPE_VARINT);
+        putVarint(writeBuffer, (value << 1) ^ (value >> 63));
+        flushWriteBuffer();
     }
 
     /**
@@ -248,8 +233,10 @@ public class ProtobufWriter {
      * @throws IOException if an I/O error occurs
      */
     public void writeBoolField(int fieldNumber, boolean value) throws IOException {
-        writeTag(fieldNumber, WIRETYPE_VARINT);
-        writeVarint(value ? 1 : 0);
+        writeBuffer.clear();
+        putTag(writeBuffer, fieldNumber, WIRETYPE_VARINT);
+        putVarint(writeBuffer, value ? 1 : 0);
+        flushWriteBuffer();
     }
 
     /**
@@ -260,8 +247,10 @@ public class ProtobufWriter {
      * @throws IOException if an I/O error occurs
      */
     public void writeFixed64Field(int fieldNumber, long value) throws IOException {
-        writeTag(fieldNumber, WIRETYPE_I64);
-        writeFixed64(value);
+        writeBuffer.clear();
+        putTag(writeBuffer, fieldNumber, WIRETYPE_I64);
+        putFixed64(writeBuffer, value);
+        flushWriteBuffer();
     }
 
     /**
@@ -272,8 +261,10 @@ public class ProtobufWriter {
      * @throws IOException if an I/O error occurs
      */
     public void writeFixed32Field(int fieldNumber, int value) throws IOException {
-        writeTag(fieldNumber, WIRETYPE_I32);
-        writeFixed32(value);
+        writeBuffer.clear();
+        putTag(writeBuffer, fieldNumber, WIRETYPE_I32);
+        putFixed32(writeBuffer, value);
+        flushWriteBuffer();
     }
 
     /**
@@ -284,8 +275,10 @@ public class ProtobufWriter {
      * @throws IOException if an I/O error occurs
      */
     public void writeDoubleField(int fieldNumber, double value) throws IOException {
-        writeTag(fieldNumber, WIRETYPE_I64);
-        writeDouble(value);
+        writeBuffer.clear();
+        putTag(writeBuffer, fieldNumber, WIRETYPE_I64);
+        putFixed64(writeBuffer, Double.doubleToRawLongBits(value));
+        flushWriteBuffer();
     }
 
     /**
@@ -296,8 +289,10 @@ public class ProtobufWriter {
      * @throws IOException if an I/O error occurs
      */
     public void writeFloatField(int fieldNumber, float value) throws IOException {
-        writeTag(fieldNumber, WIRETYPE_I32);
-        writeFloat(value);
+        writeBuffer.clear();
+        putTag(writeBuffer, fieldNumber, WIRETYPE_I32);
+        putFixed32(writeBuffer, Float.floatToRawIntBits(value));
+        flushWriteBuffer();
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -315,8 +310,10 @@ public class ProtobufWriter {
         if (data == null) {
             return;
         }
-        writeTag(fieldNumber, WIRETYPE_LEN);
-        writeVarint(data.length);
+        writeBuffer.clear();
+        putTag(writeBuffer, fieldNumber, WIRETYPE_LEN);
+        putVarint(writeBuffer, data.length);
+        flushWriteBuffer();
         writeToChannel(ByteBuffer.wrap(data));
     }
 
@@ -359,8 +356,10 @@ public class ProtobufWriter {
         ByteBuffer messageData = tempChannel.toByteBuffer();
         int messageSize = messageData.remaining();
 
-        writeTag(fieldNumber, WIRETYPE_LEN);
-        writeVarint(messageSize);
+        writeBuffer.clear();
+        putTag(writeBuffer, fieldNumber, WIRETYPE_LEN);
+        putVarint(writeBuffer, messageSize);
+        flushWriteBuffer();
         writeToChannel(messageData);
     }
 
@@ -376,9 +375,53 @@ public class ProtobufWriter {
         if (encodedMessage == null || !encodedMessage.hasRemaining()) {
             return;
         }
-        writeTag(fieldNumber, WIRETYPE_LEN);
-        writeVarint(encodedMessage.remaining());
+        writeBuffer.clear();
+        putTag(writeBuffer, fieldNumber, WIRETYPE_LEN);
+        putVarint(writeBuffer, encodedMessage.remaining());
+        flushWriteBuffer();
         writeToChannel(encodedMessage);
+    }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // Scratch buffer encoding
+    // ─────────────────────────────────────────────────────────────────────────
+
+    private static void putTag(ByteBuffer buffer, int fieldNumber, int wireType) {
+        putVarint(buffer, (fieldNumber << 3) | wireType);
+    }
+
+    private static void putVarint(ByteBuffer buffer, long value) {
+        while (true) {
+            if ((value & ~0x7FL) == 0) {
+                buffer.put((byte) value);
+                return;
+            }
+            buffer.put((byte) ((value & 0x7F) | 0x80));
+            value >>>= 7;
+        }
+    }
+
+    private static void putFixed64(ByteBuffer buffer, long value) {
+        buffer.put((byte) (value & 0xFF));
+        buffer.put((byte) ((value >> 8) & 0xFF));
+        buffer.put((byte) ((value >> 16) & 0xFF));
+        buffer.put((byte) ((value >> 24) & 0xFF));
+        buffer.put((byte) ((value >> 32) & 0xFF));
+        buffer.put((byte) ((value >> 40) & 0xFF));
+        buffer.put((byte) ((value >> 48) & 0xFF));
+        buffer.put((byte) ((value >> 56) & 0xFF));
+    }
+
+    private static void putFixed32(ByteBuffer buffer, int value) {
+        buffer.put((byte) (value & 0xFF));
+        buffer.put((byte) ((value >> 8) & 0xFF));
+        buffer.put((byte) ((value >> 16) & 0xFF));
+        buffer.put((byte) ((value >> 24) & 0xFF));
+    }
+
+    private void flushWriteBuffer() throws IOException {
+        writeBuffer.flip();
+        writeToChannel(writeBuffer);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

@@ -133,4 +133,25 @@
 
   <target name="test" depends="junit-test"/>
 
+  <target name="perf-build" depends="build">
+    <mkdir dir="${test}/perf/classes"/>
+    <javac srcdir="${test}/perf/src" destdir="${test}/perf/classes" debug="true"
+           release="${java.release.version}"
+           includeantruntime="false">
+      <classpath>
+        <pathelement location="${build}"/>
+      </classpath>
+    </javac>
+  </target>
+
+  <target name="perf" depends="perf-build"
+          description="Run ad-hoc encode/parse throughput harness">
+    <java classname="org.bluezoo.protobuf.ProtobufPerf" fork="true">
+      <classpath>
+        <pathelement location="${test}/perf/classes"/>
+        <pathelement location="${build}"/>
+      </classpath>
+    </java>
+  </target>
+
 </project>

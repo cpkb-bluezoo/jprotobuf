@@ -77,6 +77,7 @@ parser.close();
 ```bash
 ant build
 ant test
+ant perf    # optional ad-hoc throughput harness (not a CI gate)
 ```
 
 Requires JDK 21+.
