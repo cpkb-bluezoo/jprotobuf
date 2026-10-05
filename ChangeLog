@@ -1,0 +1,42 @@
+jprotobuf ChangeLog
+===================
+
+Version 1.1.0 (2026-10-05)
+--------------------------
+
+### Added
+
+- `ProtobufParser(ProtobufHandler, int maxMessageDepth, int maxLengthDelimitedSize)`
+  for configurable limits on untrusted input.
+- `ProtobufParser.DEFAULT_MAX_MESSAGE_DEPTH` (100) and
+  `ProtobufParser.UNLIMITED_LENGTH_DELIMITED` (`Integer.MAX_VALUE`); the
+  single-argument constructor keeps the previous behaviour (default depth,
+  no cap on declared length-delimited sizes).
+
+### Fixed
+
+- Reject length-delimited fields that extend past an embedded message's
+  declared length, and bound tag, varint, and fixed reads to the active
+  message budget so parent parsing cannot desync on hostile wire data.
+
+### Performance
+
+- Parser nesting uses a fixed primitive stack instead of rebuilding per field.
+- Writer coalesces tag and value into one channel write for common field types.
+- Optional `ant perf` harness for ad-hoc throughput checks (not a CI gate).
+
+Version 1.0.0 (2026-09-16)
+--------------------------
+
+Initial release (split from gumdrop).
+
+- Zero-dependency Protocol Buffers wire-format encoder and decoder for Java
+  21+.
+- Push-based `ProtobufParser` with incremental `receive(ByteBuffer)` parsing,
+  underflow recovery, and nested embedded-message tracking via
+  `ProtobufHandler`.
+- `ProtobufWriter` for varint, fixed32/64, and length-delimited fields.
+- `ByteBufferChannel` as an auto-expanding in-memory `WritableByteChannel`.
+- `DefaultProtobufHandler` with helpers for common scalar and bytes/string
+  interpretations.
+- Published API Javadoc and Maven Central coordinates (`org.bluezoo:jprotobuf`).
