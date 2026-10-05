@@ -66,6 +66,15 @@ import java.util.ResourceBundle;
  */
 public class ProtobufParser {
 
+    /** Default maximum nested message depth for untrusted input. */
+    public static final int DEFAULT_MAX_MESSAGE_DEPTH = 100;
+
+    /**
+     * No limit on declared length-delimited field sizes ({@code writeBytesField},
+     * strings, embedded messages).
+     */
+    public static final int UNLIMITED_LENGTH_DELIMITED = Integer.MAX_VALUE;
+
     private static final ResourceBundle L10N =
             ResourceBundle.getBundle("org.bluezoo.protobuf.L10N");
 
@@ -82,6 +91,8 @@ public class ProtobufParser {
     private static final int WIRETYPE_I32 = 5;
 
     private final ProtobufHandler handler;
+    private final int maxMessageDepth;
+    private final int maxLengthDelimitedSize;
 
     // Message nesting - remaining payload bytes at each level (primitive stack)
     private int[] messageRemaining = new int[4];
@@ -97,12 +108,36 @@ public class ProtobufParser {
     private boolean varintUnderflow;
 
     /**
-     * Creates a new parser with the given handler.
+     * Creates a new parser with the given handler and default limits.
      *
      * @param handler the handler to receive parse events
      */
     public ProtobufParser(ProtobufHandler handler) {
+        this(handler, DEFAULT_MAX_MESSAGE_DEPTH, UNLIMITED_LENGTH_DELIMITED);
+    }
+
+    /**
+     * Creates a new parser with the given handler and security limits.
+     *
+     * @param handler the handler to receive parse events
+     * @param maxMessageDepth maximum nested embedded-message depth (at least 1)
+     * @param maxLengthDelimitedSize maximum declared payload length for
+     *     length-delimited fields (bytes, strings, embedded messages)
+     */
+    public ProtobufParser(ProtobufHandler handler, int maxMessageDepth,
+            int maxLengthDelimitedSize) {
+        if (handler == null) {
+            throw new IllegalArgumentException("handler");
+        }
+        if (maxMessageDepth < 1) {
+            throw new IllegalArgumentException("maxMessageDepth");
+        }
+        if (maxLengthDelimitedSize < 0) {
+            throw new IllegalArgumentException("maxLengthDelimitedSize");
+        }
         this.handler = handler;
+        this.maxMessageDepth = maxMessageDepth;
+        this.maxLengthDelimitedSize = maxLengthDelimitedSize;
     }
 
     /**
@@ -146,7 +181,8 @@ public class ProtobufParser {
             int fieldStart = data.position();
 
             // Try to read the tag
-            long tagValue = tryReadVarint(data);
+            int maxFieldBytes = messageBytesRemaining();
+            long tagValue = tryReadVarint(data, maxFieldBytes);
             if (varintUnderflow) {
                 // Underflow - reset position and return
                 data.position(fieldStart);
@@ -166,8 +202,8 @@ public class ProtobufParser {
 
             switch (wireType) {
                 case WIRETYPE_VARINT: {
-                    int valueStart = data.position();
-                    long value = tryReadVarint(data);
+                    int maxVarintBytes = remainingFieldBytes(data, fieldStart);
+                    long value = tryReadVarint(data, maxVarintBytes);
                     if (varintUnderflow) {
                         data.position(fieldStart);
                         underflow = true;
@@ -179,9 +215,7 @@ public class ProtobufParser {
                 }
 
                 case WIRETYPE_I64: {
-                    if (data.remaining() < 8) {
-                        data.position(fieldStart);
-                        underflow = true;
+                    if (!ensureFixedValueAvailable(data, fieldStart, 8)) {
                         return;
                     }
                     long value = readFixed64(data);
@@ -191,9 +225,7 @@ public class ProtobufParser {
                 }
 
                 case WIRETYPE_I32: {
-                    if (data.remaining() < 4) {
-                        data.position(fieldStart);
-                        underflow = true;
+                    if (!ensureFixedValueAvailable(data, fieldStart, 4)) {
                         return;
                     }
                     int value = readFixed32(data);
@@ -203,8 +235,8 @@ public class ProtobufParser {
                 }
 
                 case WIRETYPE_LEN: {
-                    int lenStart = data.position();
-                    long lengthValue = tryReadVarint(data);
+                    int maxLengthPrefixBytes = remainingFieldBytes(data, fieldStart);
+                    long lengthValue = tryReadVarint(data, maxLengthPrefixBytes);
                     if (varintUnderflow) {
                         data.position(fieldStart);
                         underflow = true;
@@ -217,6 +249,12 @@ public class ProtobufParser {
                                 L10N.getString("err.negative_length"), length);
                         throw new ProtobufParseException(msg);
                     }
+                    if (length > maxLengthDelimitedSize) {
+                        String msg = MessageFormat.format(
+                                L10N.getString("err.length_delimited_too_large"), length);
+                        throw new ProtobufParseException(msg);
+                    }
+                    ensureLengthDelimitedPayloadFits(data, fieldStart, length);
 
                     if (handler.isMessage(fieldNumber)) {
                         // Embedded message - decrement parent levels by tag + length prefix
@@ -301,13 +339,30 @@ public class ProtobufParser {
      * @throws ProtobufParseException if the varint is malformed
      */
     private long tryReadVarint(ByteBuffer data) throws ProtobufParseException {
+        return tryReadVarint(data, Integer.MAX_VALUE);
+    }
+
+    /**
+     * Reads a varint using at most {@code maxBytes} from the buffer.
+     *
+     * @param maxBytes maximum number of value bytes (not including any bytes
+     *     already consumed before this call)
+     */
+    private long tryReadVarint(ByteBuffer data, int maxBytes)
+            throws ProtobufParseException {
         int startPos = data.position();
         long result = 0;
         int shift = 0;
+        int bytesRead = 0;
         varintUnderflow = false;
 
         while (data.hasRemaining()) {
+            if (bytesRead >= maxBytes) {
+                throw new ProtobufParseException(
+                        L10N.getString("err.field_exceeds_message"));
+            }
             byte b = data.get();
+            bytesRead++;
             result |= (long) (b & 0x7F) << shift;
 
             if ((b & 0x80) == 0) {
@@ -324,6 +379,52 @@ public class ProtobufParser {
         data.position(startPos);
         varintUnderflow = true;
         return -1;
+    }
+
+    /**
+     * Bytes still available for the value portion of the field being parsed.
+     */
+    private int remainingFieldBytes(ByteBuffer data, int fieldStart) {
+        int messageLeft = messageBytesRemaining();
+        if (messageLeft == Integer.MAX_VALUE) {
+            return Integer.MAX_VALUE;
+        }
+        int fieldSoFar = data.position() - fieldStart;
+        return messageLeft - fieldSoFar;
+    }
+
+    private int messageBytesRemaining() {
+        if (messageDepth == 0) {
+            return Integer.MAX_VALUE;
+        }
+        return messageRemaining[messageDepth - 1];
+    }
+
+    /**
+     * Ensures a fixed-width value fits in the current nested message budget.
+     *
+     * @return false if the buffer does not yet hold the full value (underflow)
+     */
+    private boolean ensureFixedValueAvailable(ByteBuffer data, int fieldStart,
+            int valueBytes) throws ProtobufParseException {
+        int left = remainingFieldBytes(data, fieldStart);
+        if (valueBytes > left) {
+            throw new ProtobufParseException(L10N.getString("err.field_exceeds_message"));
+        }
+        if (data.remaining() < valueBytes) {
+            data.position(fieldStart);
+            underflow = true;
+            return false;
+        }
+        return true;
+    }
+
+    private void ensureLengthDelimitedPayloadFits(ByteBuffer data, int fieldStart,
+            int payloadLength) throws ProtobufParseException {
+        int left = remainingFieldBytes(data, fieldStart);
+        if (payloadLength > left) {
+            throw new ProtobufParseException(L10N.getString("err.field_exceeds_message"));
+        }
     }
 
     /**
@@ -350,7 +451,12 @@ public class ProtobufParser {
         return result;
     }
 
-    private void pushMessageRemaining(int length) {
+    private void pushMessageRemaining(int length) throws ProtobufParseException {
+        if (messageDepth >= maxMessageDepth) {
+            String msg = MessageFormat.format(
+                    L10N.getString("err.message_depth_exceeded"), maxMessageDepth);
+            throw new ProtobufParseException(msg);
+        }
         if (messageDepth == messageRemaining.length) {
             int[] grown = new int[messageDepth * 2];
             System.arraycopy(messageRemaining, 0, grown, 0, messageDepth);

@@ -345,6 +345,77 @@ public class ProtobufParserTest {
         }
     }
 
+    // -- Security / limit tests --
+
+    @Test
+    public void testLengthDelimitedFieldExceedsEmbeddedMessageBudget() throws Exception {
+        // Outer field 2: embedded message, declared length 4 bytes.
+        // Inner body claims a 50-byte string but only 2 payload bytes fit.
+        ByteBuffer data = ByteBuffer.wrap(new byte[] {
+                0x12, 0x04, // field 2, length 4
+                0x0A, 0x32, 0x00, 0x00 // field 1 string, length 50, padding
+        });
+
+        MessageTrackingHandler handler = new MessageTrackingHandler();
+        handler.messageFields.add(2);
+
+        ProtobufParser parser = new ProtobufParser(handler);
+        try {
+            parser.receive(data);
+            fail("Expected ProtobufParseException");
+        } catch (ProtobufParseException e) {
+            assertTrue(e.getMessage().contains("embedded message"));
+        }
+    }
+
+    @Test
+    public void testMaxMessageDepthExceeded() throws Exception {
+        ByteBuffer data = writeMessage(new MessageWriter() {
+            @Override public void write(ProtobufWriter w) throws IOException {
+                w.writeMessageField(1, new ProtobufWriter.MessageContent() {
+                    @Override public void writeTo(ProtobufWriter level1) throws IOException {
+                        level1.writeMessageField(1, new ProtobufWriter.MessageContent() {
+                            @Override public void writeTo(ProtobufWriter level2) throws IOException {
+                                level2.writeVarintField(2, 1);
+                            }
+                        });
+                    }
+                });
+            }
+        });
+
+        MessageTrackingHandler handler = new MessageTrackingHandler();
+        handler.messageFields.add(1);
+
+        ProtobufParser parser = new ProtobufParser(handler, 1,
+                ProtobufParser.UNLIMITED_LENGTH_DELIMITED);
+        try {
+            parser.receive(data);
+            fail("Expected ProtobufParseException");
+        } catch (ProtobufParseException e) {
+            assertTrue(e.getMessage().contains("depth"));
+        }
+    }
+
+    @Test
+    public void testMaxLengthDelimitedSizeExceeded() throws Exception {
+        ByteBuffer data = writeMessage(new MessageWriter() {
+            @Override public void write(ProtobufWriter w) throws IOException {
+                w.writeBytesField(1, new byte[] { 0x01, 0x02, 0x03 });
+            }
+        });
+
+        RecordingHandler handler = new RecordingHandler();
+        ProtobufParser parser = new ProtobufParser(handler,
+                ProtobufParser.DEFAULT_MAX_MESSAGE_DEPTH, 2);
+        try {
+            parser.receive(data);
+            fail("Expected ProtobufParseException");
+        } catch (ProtobufParseException e) {
+            assertTrue(e.getMessage().contains("Length-delimited"));
+        }
+    }
+
     // -- Error handling tests --
 
     @Test
