@@ -1,6 +1,63 @@
 jprotobuf ChangeLog
 ===================
 
+Version 1.1.1 (2026-10-09)
+--------------------------
+
+Fixes and performance work; no API changes. Parsing is slightly stricter and
+the writer's encoding of very large field numbers and `sint32` values is now
+canonical (see below).
+
+### Fixed
+
+- Reject length-delimited fields whose declared length does not fit a signed
+  32-bit int, and tags wider than 32 bits. Both were truncated to `int` before
+  being checked, so a length of 2^32 + 3 was read as 3, 2^32 as 0, and a tag of
+  2^32 + 8 as field 1, letting this parser read different fields from the same
+  bytes than a strict one. They now throw `ProtobufParseException`; a negative
+  length is reported with its full 64-bit value. (Security: parser
+  differential.)
+- `ProtobufWriter` wrote field numbers of 2^28 and above, and `sint32` values
+  of magnitude 2^30 or more, as 10-byte varints because the `int` was
+  sign-extended; they are now the canonical 5 bytes. The previous output still
+  decoded to the same values.
+- `ByteBufferChannel` no longer hangs forever when growing past 1 GiB (the
+  capacity doubled through `Integer.MIN_VALUE` to zero), or when created with
+  zero capacity. Growth is capped at `Integer.MAX_VALUE - 8` and a write that
+  would need more throws `IOException`.
+- `ProtobufWriter` no longer spins forever when the channel's `write` returns
+  a negative value; it throws `ClosedChannelException`.
+
+### Performance
+
+- Parser: finishing a field is O(1) regardless of nesting depth (message ends
+  are tracked as stream offsets instead of decrementing every open level),
+  roughly 4x faster on deeply nested input.
+- Parser: single-byte varints (most tags and small values) take a fast path;
+  multi-byte varints and short string fields parse roughly 40-70% faster.
+- Writer: embedded messages reuse a scratch buffer per nesting level instead
+  of allocating 64 KB each, roughly 1.8x faster on nested input and far less
+  garbage.
+- Writer: a tag, length and short payload go out in a single channel write,
+  short ASCII strings are encoded without an intermediate `byte[]`, and
+  fixed-width values are written with one put.
+
+### Documentation
+
+- Document the limits to set when parsing untrusted input
+  (`maxLengthDelimitedSize`, `maxMessageDepth`) in the `ProtobufParser`
+  Javadoc and the README, and that the buffer passed to `handleBytes` is a view
+  of the input that must be copied if kept.
+
+### Changed
+
+- The license is now the GNU Lesser General Public License version 3 (was
+  version 2.1); the full GPL v3 text it builds on is included as
+  `LICENSE-GPL`.
+- Test dependencies (JUnit 4, Hamcrest) are no longer kept in git; `ant test`
+  downloads them from Maven Central on first use. Building and releasing the
+  library downloads nothing.
+
 Version 1.1.0 (2026-10-05)
 --------------------------
 
