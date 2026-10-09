@@ -193,6 +193,12 @@ public class ProtobufParser {
                 return;
             }
 
+            // A tag is an unsigned 32-bit value. Truncating a wider varint
+            // would let this parser read different fields from the same
+            // bytes than a strict one.
+            if ((tagValue >>> 32) != 0) {
+                throw new ProtobufParseException(L10N.getString("err.tag_too_large"));
+            }
             int tag = (int) tagValue;
             int fieldNumber = tag >>> 3;
             int wireType = tag & 0x07;
@@ -246,12 +252,19 @@ public class ProtobufParser {
                         return;
                     }
 
-                    int length = (int) lengthValue;
-                    if (length < 0) {
+                    // Check the full 64-bit value: casting first would turn
+                    // lengths such as 2^32 + 3 into small, valid-looking ones.
+                    if (lengthValue < 0) {
                         String msg = MessageFormat.format(
-                                L10N.getString("err.negative_length"), length);
+                                L10N.getString("err.negative_length"), lengthValue);
                         throw new ProtobufParseException(msg);
                     }
+                    if (lengthValue > Integer.MAX_VALUE) {
+                        String msg = MessageFormat.format(
+                                L10N.getString("err.length_out_of_range"), lengthValue);
+                        throw new ProtobufParseException(msg);
+                    }
+                    int length = (int) lengthValue;
                     if (length > maxLengthDelimitedSize) {
                         String msg = MessageFormat.format(
                                 L10N.getString("err.length_delimited_too_large"), length);

@@ -885,6 +885,113 @@ public class ProtobufParserTest {
         }
     }
 
+    // -- Out-of-range length and tag varints --
+
+    /** The varint encoding of an unsigned 64-bit value, as raw bytes. */
+    private static byte[] rawVarint(long value) {
+        ByteBuffer b = ByteBuffer.allocate(10);
+        while ((value & ~0x7FL) != 0) {
+            b.put((byte) ((value & 0x7F) | 0x80));
+            value >>>= 7;
+        }
+        b.put((byte) value);
+        byte[] out = new byte[b.position()];
+        b.flip();
+        b.get(out);
+        return out;
+    }
+
+    private static byte[] concat(byte[]... parts) {
+        int n = 0;
+        for (byte[] p : parts) {
+            n += p.length;
+        }
+        byte[] out = new byte[n];
+        int off = 0;
+        for (byte[] p : parts) {
+            System.arraycopy(p, 0, out, off, p.length);
+            off += p.length;
+        }
+        return out;
+    }
+
+    private static void assertRejectedWithoutEvents(String label, byte[] data)
+            throws Exception {
+        EventLog log = new EventLog();
+        ProtobufParser parser = new ProtobufParser(log);
+        try {
+            parser.receive(ByteBuffer.wrap(data));
+            fail(label + ": expected ProtobufParseException, got events " + log.events);
+        } catch (ProtobufParseException expected) {
+            // good
+        }
+        assertTrue(label + ": events " + log.events, log.events.isEmpty());
+    }
+
+    @Test
+    public void testLengthVarintOutsideIntRangeRejected() throws Exception {
+        // A length that does not fit a signed 32-bit int must be rejected as
+        // written; it must never be truncated to a smaller length (2^32 + 3
+        // used to be read as 3 and 2^32 as 0), which lets different parsers
+        // see different fields in the same bytes.
+        long[] lengths = {
+            1L << 31, (1L << 31) + 1, (1L << 32) - 1, 1L << 32, (1L << 32) + 3,
+            (1L << 33) + 7, Long.MAX_VALUE, Long.MIN_VALUE, -1L, -2L
+        };
+        for (long len : lengths) {
+            byte[] data = concat(new byte[] {0x0A}, rawVarint(len),
+                    new byte[] {'a', 'b', 'c', 0x10, 0x07});
+            assertRejectedWithoutEvents("length " + len, data);
+        }
+    }
+
+    @Test
+    public void testNestedLengthVarintOutsideIntRangeRejected() throws Exception {
+        // field 10 (message) { field 2 LEN, length 2^32 + 1 }
+        byte[] inner = concat(new byte[] {0x12}, rawVarint((1L << 32) + 1), new byte[] {'x'});
+        byte[] data = concat(new byte[] {0x52, (byte) inner.length}, inner);
+        EventLog log = new EventLog();
+        try {
+            new ProtobufParser(log).receive(ByteBuffer.wrap(data));
+            fail("expected ProtobufParseException");
+        } catch (ProtobufParseException expected) {
+            // good
+        }
+        assertEquals(java.util.Arrays.asList("S10"), log.events);
+    }
+
+    @Test
+    public void testMaximumLengthIsNotRejectedAsMalformed() throws Exception {
+        // Integer.MAX_VALUE is a legal declared length: a field this large
+        // is simply incomplete until the data arrives.
+        EventLog log = new EventLog();
+        ProtobufParser parser = new ProtobufParser(log);
+        ByteBuffer buf = ByteBuffer.wrap(concat(new byte[] {0x0A}, rawVarint(Integer.MAX_VALUE)));
+        parser.receive(buf);
+        assertTrue(parser.isUnderflow());
+        assertEquals(0, buf.position());
+        assertTrue(log.events.isEmpty());
+    }
+
+    @Test
+    public void testTagVarintWiderThan32BitsRejected() throws Exception {
+        // 2^32 + 8 used to be truncated to tag 8 (field 1, varint).
+        long[] tags = {(1L << 32) + 8, (1L << 33) + 8, (1L << 40) + 8, Long.MIN_VALUE + 8, -1L};
+        for (long tag : tags) {
+            byte[] data = concat(rawVarint(tag), new byte[] {0x05});
+            assertRejectedWithoutEvents("tag " + tag, data);
+        }
+    }
+
+    @Test
+    public void testLargestFieldNumberStillAccepted() throws Exception {
+        // Tag 0xFFFFFFF8 = field 2^29 - 1, varint: five bytes, valid.
+        EventLog log = new EventLog();
+        new ProtobufParser(log).receive(ByteBuffer.wrap(
+                concat(rawVarint(0xFFFFFFF8L), new byte[] {0x01})));
+        assertEquals(java.util.Arrays.asList("V536870911=1"), log.events);
+    }
+
     // -- Helper methods --
 
     private interface MessageWriter {
