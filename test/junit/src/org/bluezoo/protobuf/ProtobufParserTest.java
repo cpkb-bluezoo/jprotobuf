@@ -8,6 +8,7 @@ import static org.junit.Assert.fail;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Random;
@@ -722,6 +723,166 @@ public class ProtobufParserTest {
         parser.receive(ByteBuffer.wrap(new byte[] {0x52, 0x02, 0x08, 0x09, 0x10, 0x03}));
         parser.close();
         assertEquals(java.util.Arrays.asList("S10", "V1=9", "E", "V2=3"), log.events);
+    }
+
+    // -- Varint and fixed-width decoding tests --
+
+    private static ByteBuffer rawBuffer(String kind, byte[] bytes) {
+        switch (kind) {
+            case "heap":
+                return ByteBuffer.wrap(bytes);
+            case "direct": {
+                ByteBuffer d = ByteBuffer.allocateDirect(bytes.length);
+                d.put(bytes).flip();
+                return d;
+            }
+            case "readonly":
+                return ByteBuffer.wrap(bytes).asReadOnlyBuffer();
+            case "offset": {
+                // array offset and non-zero buffer position
+                byte[] padded = new byte[bytes.length + 7];
+                System.arraycopy(bytes, 0, padded, 5, bytes.length);
+                return ByteBuffer.wrap(padded, 5, bytes.length);
+            }
+            case "slice": {
+                byte[] padded = new byte[bytes.length + 7];
+                System.arraycopy(bytes, 0, padded, 3, bytes.length);
+                ByteBuffer b = ByteBuffer.wrap(padded);
+                b.position(3).limit(3 + bytes.length);
+                return b.slice();
+            }
+            default:
+                throw new IllegalArgumentException(kind);
+        }
+    }
+
+    private static final String[] BUFFER_KINDS = {"heap", "direct", "readonly", "offset", "slice"};
+
+    private static byte[] varintBytes(long value) throws IOException {
+        ByteBufferChannel ch = new ByteBufferChannel(16);
+        new ProtobufWriter(ch).writeVarint(value);
+        return ch.toByteArray();
+    }
+
+    @Test
+    public void testVarintValuesOfEveryLength() throws Exception {
+        // Field 1 varint with values straddling every 7-bit boundary, plus
+        // negatives (always 10 bytes), through every buffer flavour and
+        // fed one byte at a time.
+        List<Long> values = new ArrayList<>();
+        for (int bits = 0; bits <= 63; bits++) {
+            long edge = (1L << bits);
+            values.add(edge - 1);
+            values.add(edge);
+            values.add(edge + 1);
+            values.add(-edge);
+        }
+        values.add(Long.MIN_VALUE);
+        values.add(Long.MAX_VALUE);
+
+        for (long v : values) {
+            ByteBufferChannel ch = new ByteBufferChannel(16);
+            new ProtobufWriter(ch).writeVarintField(1, v);
+            byte[] data = ch.toByteArray();
+
+            for (String kind : BUFFER_KINDS) {
+                EventLog log = new EventLog();
+                ProtobufParser parser = new ProtobufParser(log);
+                ByteBuffer buf = rawBuffer(kind, data);
+                parser.receive(buf);
+                parser.close();
+                assertEquals(kind + " " + v, java.util.Arrays.asList("V1=" + v), log.events);
+                assertFalse(buf.hasRemaining());
+            }
+
+            // Every strict prefix underflows without consuming anything.
+            for (int n = 0; n < data.length; n++) {
+                EventLog log = new EventLog();
+                ProtobufParser parser = new ProtobufParser(log);
+                ByteBuffer buf = ByteBuffer.wrap(data, 0, n);
+                parser.receive(buf);
+                assertEquals("prefix " + n + " of " + v, 0, buf.position());
+                assertTrue(log.events.isEmpty());
+                assertEquals(n > 0, parser.isUnderflow());
+            }
+            assertEquals(java.util.Arrays.asList("V1=" + v), parseChunked(data, new Random(5), 1));
+        }
+    }
+
+    @Test
+    public void testMultiByteTagsParse() throws Exception {
+        // Field numbers 16, 2048, 262144 and the maximum need 2-5 byte tags.
+        int[] fields = {16, 2047, 2048, 262143, 262144, 536870911};
+        for (int f : fields) {
+            ByteBufferChannel ch = new ByteBufferChannel(16);
+            ProtobufWriter w = new ProtobufWriter(ch);
+            w.writeVarintField(f, 9);
+            w.writeFixed32Field(f, 7);
+            byte[] data = ch.toByteArray();
+            for (int maxChunk : new int[] {1, 1000}) {
+                assertEquals("field " + f,
+                        java.util.Arrays.asList("V" + f + "=9", "I" + f + "=7"),
+                        parseChunked(data, new Random(f), maxChunk));
+            }
+        }
+    }
+
+    @Test
+    public void testVarintTooLongRejected() throws Exception {
+        // Ten continuation bytes: no terminator within the 10 permitted.
+        byte[] data = new byte[12];
+        data[0] = 0x08; // field 1 varint
+        for (int i = 1; i <= 10; i++) {
+            data[i] = (byte) 0x80;
+        }
+        data[11] = 0x00;
+        for (int n : new int[] {11, 12}) { // rejected as soon as the 10th byte arrives
+            ProtobufParser parser = new ProtobufParser(new EventLog());
+            try {
+                parser.receive(ByteBuffer.wrap(data, 0, n));
+                fail("Expected ProtobufParseException for " + n + " bytes");
+            } catch (ProtobufParseException e) {
+                assertTrue(e.getMessage(), e.getMessage().toLowerCase().contains("varint"));
+            }
+        }
+        // ...but nine continuation bytes is still just incomplete.
+        ProtobufParser parser = new ProtobufParser(new EventLog());
+        ByteBuffer buf = ByteBuffer.wrap(data, 0, 10);
+        parser.receive(buf);
+        assertTrue(parser.isUnderflow());
+        assertEquals(0, buf.position());
+    }
+
+    @Test
+    public void testFixedValuesAnyBufferAndByteOrder() throws Exception {
+        long[] longs = {0, 1, -1, 0x0807060504030201L, Long.MIN_VALUE, Long.MAX_VALUE, 0xDEADBEEFL};
+        int[] ints = {0, 1, -1, 0x04030201, Integer.MIN_VALUE, Integer.MAX_VALUE};
+        for (ByteOrder order : new ByteOrder[] {ByteOrder.BIG_ENDIAN, ByteOrder.LITTLE_ENDIAN}) {
+            for (String kind : BUFFER_KINDS) {
+                for (long l : longs) {
+                    ByteBufferChannel ch = new ByteBufferChannel(16);
+                    new ProtobufWriter(ch).writeFixed64Field(3, l);
+                    ByteBuffer buf = rawBuffer(kind, ch.toByteArray());
+                    buf.order(order);
+                    EventLog log = new EventLog();
+                    new ProtobufParser(log).receive(buf);
+                    assertEquals(kind + " " + order + " " + l,
+                            java.util.Arrays.asList("L3=" + l), log.events);
+                    assertEquals("caller's byte order must be left alone", order, buf.order());
+                }
+                for (int i : ints) {
+                    ByteBufferChannel ch = new ByteBufferChannel(16);
+                    new ProtobufWriter(ch).writeFixed32Field(3, i);
+                    ByteBuffer buf = rawBuffer(kind, ch.toByteArray());
+                    buf.order(order);
+                    EventLog log = new EventLog();
+                    new ProtobufParser(log).receive(buf);
+                    assertEquals(kind + " " + order + " " + i,
+                            java.util.Arrays.asList("I3=" + i), log.events);
+                    assertEquals(order, buf.order());
+                }
+            }
+        }
     }
 
     // -- Helper methods --

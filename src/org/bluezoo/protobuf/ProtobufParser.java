@@ -351,33 +351,57 @@ public class ProtobufParser {
      */
     private long tryReadVarint(ByteBuffer data, int maxBytes)
             throws ProtobufParseException {
-        int startPos = data.position();
-        long result = 0;
-        int shift = 0;
-        int bytesRead = 0;
         varintUnderflow = false;
+        // Kept small enough to inline everywhere: most tags and small
+        // values are a single byte
+        if (maxBytes > 0 && data.hasRemaining()) {
+            byte first = data.get();
+            if (first >= 0) {
+                return first;
+            }
+            return readVarintTail(data, maxBytes, first);
+        }
+        return readVarintUnavailable(data);
+    }
 
-        while (data.hasRemaining()) {
-            if (bytesRead >= maxBytes) {
+    /**
+     * Continues a varint whose first byte, already consumed, had its
+     * continuation bit set.
+     */
+    private long readVarintTail(ByteBuffer data, int maxBytes, byte first)
+            throws ProtobufParseException {
+        int start = data.position() - 1;
+        int avail = data.limit() - start;
+        long result = first & 0x7F;
+
+        for (int i = 1; ; i++) {
+            if (i >= avail) {
+                // Not enough data - reset position
+                data.position(start);
+                varintUnderflow = true;
+                return -1;
+            }
+            if (i >= maxBytes) {
                 throw new ProtobufParseException(
                         L10N.getString("err.field_exceeds_message"));
             }
             byte b = data.get();
-            bytesRead++;
-            result |= (long) (b & 0x7F) << shift;
-
-            if ((b & 0x80) == 0) {
+            result |= (long) (b & 0x7F) << (7 * i);
+            if (b >= 0) {
                 return result; // Complete
             }
-
-            shift += 7;
-            if (shift >= 64) {
+            if (i == 9) {
+                // Tenth byte still has its continuation bit set
                 throw new ProtobufParseException(L10N.getString("err.varint_too_long"));
             }
         }
+    }
 
-        // Not enough data - reset position
-        data.position(startPos);
+    /** No byte can be read: either the buffer is empty or the budget is spent. */
+    private long readVarintUnavailable(ByteBuffer data) throws ProtobufParseException {
+        if (data.hasRemaining()) {
+            throw new ProtobufParseException(L10N.getString("err.field_exceeds_message"));
+        }
         varintUnderflow = true;
         return -1;
     }
