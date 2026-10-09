@@ -46,6 +46,12 @@ import java.nio.channels.WritableByteChannel;
  */
 public class ByteBufferChannel implements WritableByteChannel {
 
+    /**
+     * Largest buffer capacity this channel will allocate: the largest array
+     * size every JVM supports (some reserve header words).
+     */
+    static final int MAX_CAPACITY = Integer.MAX_VALUE - 8;
+
     private ByteBuffer buffer;
     private int leadingReserve;
     private boolean open;
@@ -192,16 +198,11 @@ public class ByteBufferChannel implements WritableByteChannel {
     /**
      * Ensures the buffer has at least the specified additional capacity.
      */
-    private void ensureCapacity(int additionalBytes) {
+    private void ensureCapacity(int additionalBytes) throws IOException {
         if (buffer.remaining() < additionalBytes) {
             int payloadEnd = buffer.position();
-            int required = payloadEnd + additionalBytes;
-            // max: a zero-capacity buffer would otherwise never grow by doubling
-            int newCapacity = Math.max(buffer.capacity(), 1);
-
-            while (newCapacity < required) {
-                newCapacity = newCapacity * 2;
-            }
+            long required = (long) payloadEnd + additionalBytes;
+            int newCapacity = grownCapacity(buffer.capacity(), required);
 
             ByteBuffer newBuffer = ByteBuffer.allocate(newCapacity);
             if (leadingReserve > 0) {
@@ -218,5 +219,25 @@ public class ByteBufferChannel implements WritableByteChannel {
             buffer = newBuffer;
         }
     }
-}
 
+    /**
+     * Returns the capacity to grow to so that at least {@code required}
+     * bytes fit, by repeated doubling, never beyond {@link #MAX_CAPACITY}.
+     *
+     * @throws IOException if {@code required} exceeds the largest array
+     *     a JVM can allocate
+     */
+    static int grownCapacity(int capacity, long required) throws IOException {
+        if (required > MAX_CAPACITY) {
+            throw new IOException("Buffer would exceed maximum capacity: " + required);
+        }
+        // Work in long: doubling an int past 2^30 wraps negative and, from
+        // there, to zero, which would never reach the target.
+        // max: a zero-capacity buffer would otherwise never grow by doubling
+        long newCapacity = Math.max(capacity, 1);
+        while (newCapacity < required) {
+            newCapacity *= 2;
+        }
+        return (int) Math.min(newCapacity, MAX_CAPACITY);
+    }
+}
