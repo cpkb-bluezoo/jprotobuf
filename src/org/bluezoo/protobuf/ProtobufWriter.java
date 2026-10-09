@@ -23,6 +23,7 @@ package org.bluezoo.protobuf;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.channels.ClosedChannelException;
 import java.nio.channels.WritableByteChannel;
 import java.nio.charset.StandardCharsets;
@@ -67,6 +68,19 @@ public class ProtobufWriter {
      */
     public static final int WIRETYPE_I32 = 5;
 
+    /**
+     * Size of the scratch buffer. Large enough that a tag, a length and a
+     * short payload go out in a single channel write.
+     */
+    private static final int WRITE_BUFFER_SIZE = 128;
+
+    /**
+     * Longest string (in chars) encoded straight into the scratch buffer
+     * when it is pure ASCII: a tag (at most 5 bytes) and a one-byte length
+     * (under 128) leave room for it within {@link #WRITE_BUFFER_SIZE}.
+     */
+    private static final int MAX_INLINE_STRING_CHARS = 100;
+
     /** Initial capacity of the scratch channel used for embedded messages. */
     private static final int MESSAGE_SCRATCH_INITIAL_CAPACITY = 256;
 
@@ -93,8 +107,10 @@ public class ProtobufWriter {
      */
     public ProtobufWriter(WritableByteChannel channel) {
         this.channel = channel;
-        // Tag (up to 10 bytes) + value (varint up to 10, or 8-byte fixed)
-        this.writeBuffer = ByteBuffer.allocate(24);
+        // Little-endian so fixed-width values go in with a single put; the
+        // varint encoding below is byte-at-a-time and unaffected.
+        this.writeBuffer = ByteBuffer.allocate(WRITE_BUFFER_SIZE)
+                .order(ByteOrder.LITTLE_ENDIAN);
         this.bytesWritten = 0;
     }
 
@@ -120,7 +136,7 @@ public class ProtobufWriter {
      * @throws IOException if an I/O error occurs
      */
     public void writeTag(int fieldNumber, int wireType) throws IOException {
-        writeVarint((fieldNumber << 3) | wireType);
+        writeVarint(tagValue(fieldNumber, wireType));
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -158,7 +174,7 @@ public class ProtobufWriter {
      * @throws IOException if an I/O error occurs
      */
     public void writeSVarint32(int value) throws IOException {
-        writeVarint((value << 1) ^ (value >> 31));
+        writeVarint(((value << 1) ^ (value >> 31)) & 0xFFFFFFFFL);
     }
 
     // ─────────────────────────────────────────────────────────────────────────
@@ -329,8 +345,14 @@ public class ProtobufWriter {
         writeBuffer.clear();
         putTag(writeBuffer, fieldNumber, WIRETYPE_LEN);
         putVarint(writeBuffer, data.length);
-        flushWriteBuffer();
-        writeToChannel(ByteBuffer.wrap(data));
+        if (data.length <= writeBuffer.remaining()) {
+            // Short payload: one channel write for header and content
+            writeBuffer.put(data);
+            flushWriteBuffer();
+        } else {
+            flushWriteBuffer();
+            writeToChannel(ByteBuffer.wrap(data));
+        }
     }
 
     /**
@@ -343,6 +365,28 @@ public class ProtobufWriter {
     public void writeStringField(int fieldNumber, String value) throws IOException {
         if (value == null) {
             return;
+        }
+        int chars = value.length();
+        if (chars <= MAX_INLINE_STRING_CHARS) {
+            // Short ASCII strings are copied straight into the scratch
+            // buffer: the UTF-8 length is the char count, so no byte[] or
+            // wrapper is needed. Anything else falls through.
+            writeBuffer.clear();
+            putTag(writeBuffer, fieldNumber, WIRETYPE_LEN);
+            putVarint(writeBuffer, chars);
+            int i = 0;
+            while (i < chars) {
+                char c = value.charAt(i);
+                if (c >= 0x80) {
+                    break;
+                }
+                writeBuffer.put((byte) c);
+                i++;
+            }
+            if (i == chars) {
+                flushWriteBuffer();
+                return;
+            }
         }
         byte[] bytes = value.getBytes(StandardCharsets.UTF_8);
         writeBytesField(fieldNumber, bytes);
@@ -429,7 +473,15 @@ public class ProtobufWriter {
     // ─────────────────────────────────────────────────────────────────────────
 
     private static void putTag(ByteBuffer buffer, int fieldNumber, int wireType) {
-        putVarint(buffer, (fieldNumber << 3) | wireType);
+        putVarint(buffer, tagValue(fieldNumber, wireType));
+    }
+
+    /**
+     * Combines field number and wire type as an unsigned 32-bit value, so
+     * field numbers of 2^28 and above are not sign-extended to 10 bytes.
+     */
+    private static long tagValue(int fieldNumber, int wireType) {
+        return ((fieldNumber << 3) | wireType) & 0xFFFFFFFFL;
     }
 
     private static void putVarint(ByteBuffer buffer, long value) {
@@ -443,22 +495,14 @@ public class ProtobufWriter {
         }
     }
 
+    // The scratch buffer is little-endian (see constructor).
+
     private static void putFixed64(ByteBuffer buffer, long value) {
-        buffer.put((byte) (value & 0xFF));
-        buffer.put((byte) ((value >> 8) & 0xFF));
-        buffer.put((byte) ((value >> 16) & 0xFF));
-        buffer.put((byte) ((value >> 24) & 0xFF));
-        buffer.put((byte) ((value >> 32) & 0xFF));
-        buffer.put((byte) ((value >> 40) & 0xFF));
-        buffer.put((byte) ((value >> 48) & 0xFF));
-        buffer.put((byte) ((value >> 56) & 0xFF));
+        buffer.putLong(value);
     }
 
     private static void putFixed32(ByteBuffer buffer, int value) {
-        buffer.put((byte) (value & 0xFF));
-        buffer.put((byte) ((value >> 8) & 0xFF));
-        buffer.put((byte) ((value >> 16) & 0xFF));
-        buffer.put((byte) ((value >> 24) & 0xFF));
+        buffer.putInt(value);
     }
 
     private void flushWriteBuffer() throws IOException {

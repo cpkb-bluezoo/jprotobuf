@@ -11,6 +11,8 @@ import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.nio.ByteBuffer;
 import java.nio.channels.WritableByteChannel;
+import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 
 import org.bluezoo.protobuf.ByteBufferChannel;
 import org.bluezoo.protobuf.ProtobufWriter;
@@ -464,6 +466,172 @@ public class ProtobufWriterTest {
         } catch (IOException expected) {
             // good: must not spin forever
         }
+    }
+
+    // -- Short length-delimited payload tests --
+
+    /** Channel that records every write call as a separate chunk. */
+    private static class RecordingChannel implements WritableByteChannel {
+        final java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream();
+        int writes;
+
+        @Override
+        public int write(ByteBuffer src) {
+            writes++;
+            int n = src.remaining();
+            byte[] b = new byte[n];
+            src.get(b);
+            out.write(b, 0, n);
+            return n;
+        }
+
+        @Override
+        public boolean isOpen() {
+            return true;
+        }
+
+        @Override
+        public void close() {
+        }
+    }
+
+    private static byte[] expectedLenField(int fieldNumber, byte[] payload) {
+        ByteBufferChannel ch = new ByteBufferChannel(16);
+        ByteBuffer hdr = ByteBuffer.allocate(20);
+        long tag = ((long) fieldNumber << 3) | 2;
+        for (long v : new long[] {tag, payload.length}) {
+            while ((v & ~0x7FL) != 0) {
+                hdr.put((byte) ((v & 0x7F) | 0x80));
+                v >>>= 7;
+            }
+            hdr.put((byte) v);
+        }
+        hdr.flip();
+        byte[] out = new byte[hdr.remaining() + payload.length];
+        hdr.get(out, 0, hdr.remaining());
+        System.arraycopy(payload, 0, out, out.length - payload.length, payload.length);
+        return out;
+    }
+
+    @Test
+    public void testShortStringFieldIsOneChannelWrite() throws IOException {
+        RecordingChannel ch = new RecordingChannel();
+        ProtobufWriter writer = new ProtobufWriter(ch);
+
+        writer.writeStringField(2, "hello");
+
+        assertEquals(1, ch.writes);
+        assertArrayEquals(expectedLenField(2, "hello".getBytes(StandardCharsets.UTF_8)),
+                ch.out.toByteArray());
+        assertEquals(7, writer.getBytesWritten());
+    }
+
+    @Test
+    public void testShortBytesFieldIsOneChannelWrite() throws IOException {
+        RecordingChannel ch = new RecordingChannel();
+        ProtobufWriter writer = new ProtobufWriter(ch);
+        byte[] payload = new byte[50];
+        Arrays.fill(payload, (byte) 0x5A);
+
+        writer.writeBytesField(3, payload);
+
+        assertEquals(1, ch.writes);
+        assertArrayEquals(expectedLenField(3, payload), ch.out.toByteArray());
+    }
+
+    @Test
+    public void testStringAndBytesFieldsAcrossSizeBoundaries() throws IOException {
+        // Sizes around any internal coalescing threshold, with small and
+        // large field numbers (1-byte and 5-byte tags), must all encode
+        // identically to the plain tag + length + payload layout.
+        int[] fieldNumbers = {1, 15, 16, 2047, 2048, 536870911};
+        for (int fieldNumber : fieldNumbers) {
+            for (int len = 0; len <= 300; len++) {
+                byte[] payload = new byte[len];
+                for (int i = 0; i < len; i++) {
+                    payload[i] = (byte) ('a' + i % 26);
+                }
+                byte[] expected = expectedLenField(fieldNumber, payload);
+
+                ByteBufferChannel bytesCh = new ByteBufferChannel(16);
+                new ProtobufWriter(bytesCh).writeBytesField(fieldNumber, payload);
+                assertArrayEquals("bytes field " + fieldNumber + " len " + len,
+                        expected, bytesCh.toByteArray());
+
+                ByteBufferChannel strCh = new ByteBufferChannel(16);
+                ProtobufWriter strWriter = new ProtobufWriter(strCh);
+                strWriter.writeStringField(fieldNumber, new String(payload, StandardCharsets.US_ASCII));
+                assertArrayEquals("string field " + fieldNumber + " len " + len,
+                        expected, strCh.toByteArray());
+                assertEquals(expected.length, strWriter.getBytesWritten());
+            }
+        }
+    }
+
+    @Test
+    public void testNonAsciiStringFields() throws IOException {
+        String[] values = {
+            "caf\u00e9",                       // 2-byte UTF-8
+            "\u20ac uro",                      // 3-byte UTF-8
+            "\ud83d\ude00 smile",             // surrogate pair, 4-byte UTF-8
+            "x".repeat(60) + "\u00e9",         // non-ASCII after a long ASCII run
+            "\u00e9".repeat(100),              // 200 bytes, one-byte char count
+        };
+        for (String value : values) {
+            ByteBufferChannel ch = new ByteBufferChannel(16);
+            new ProtobufWriter(ch).writeStringField(4, value);
+            assertArrayEquals(value,
+                    expectedLenField(4, value.getBytes(StandardCharsets.UTF_8)),
+                    ch.toByteArray());
+        }
+    }
+
+    @Test
+    public void testSVarint32OfLargeMagnitudeIsFiveBytes() throws IOException {
+        // ZigZag of an int is an unsigned 32-bit value; it must not be
+        // sign-extended into a 10-byte varint.
+        ByteBufferChannel channel = new ByteBufferChannel(16);
+        ProtobufWriter writer = new ProtobufWriter(channel);
+        writer.writeSVarint32(Integer.MIN_VALUE);   // zigzag 0xFFFFFFFF
+        writer.writeSVarint32(Integer.MAX_VALUE);   // zigzag 0xFFFFFFFE
+
+        byte[] expected = {
+            (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, 0x0F,
+            (byte) 0xFE, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, 0x0F
+        };
+        assertArrayEquals(expected, channel.toByteArray());
+    }
+
+    @Test
+    public void testWriteTagWithMaximumFieldNumber() throws IOException {
+        ByteBufferChannel channel = new ByteBufferChannel(16);
+        new ProtobufWriter(channel).writeTag(536870911, ProtobufWriter.WIRETYPE_LEN);
+
+        byte[] expected = {(byte) 0xFA, (byte) 0xFF, (byte) 0xFF, (byte) 0xFF, 0x0F};
+        assertArrayEquals(expected, channel.toByteArray());
+    }
+
+    @Test
+    public void testFixed32Field() throws IOException {
+        ByteBufferChannel channel = new ByteBufferChannel(16);
+        new ProtobufWriter(channel).writeFixed32Field(1, 0x04030201);
+
+        assertArrayEquals(new byte[] {0x0D, 0x01, 0x02, 0x03, 0x04}, channel.toByteArray());
+    }
+
+    @Test
+    public void testFixedValuesAfterLongField() throws IOException {
+        // Fixed-width writes after a long coalesced field must not be
+        // affected by leftover scratch-buffer state.
+        ByteBufferChannel channel = new ByteBufferChannel(16);
+        ProtobufWriter writer = new ProtobufWriter(channel);
+        writer.writeStringField(1, "x".repeat(90));
+        writer.writeFixed64(0x0807060504030201L);
+        writer.writeFixed32(0x0D0C0B0A);
+
+        byte[] all = channel.toByteArray();
+        byte[] tail = Arrays.copyOfRange(all, all.length - 12, all.length);
+        assertArrayEquals(new byte[] {1, 2, 3, 4, 5, 6, 7, 8, 0x0A, 0x0B, 0x0C, 0x0D}, tail);
     }
 
     // -- Varint size calculation tests --
