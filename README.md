@@ -88,4 +88,5 @@ Requires JDK 21+.
 
 ## License
 
-GNU Lesser General Public License version 3 (see [LICENSE](LICENSE)).
+GNU Lesser General Public License version 3 (see [LICENSE](LICENSE), which
+incorporates the GNU General Public License version 3 in [LICENSE-GPL](LICENSE-GPL)).
