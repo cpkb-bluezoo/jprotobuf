@@ -8,7 +8,9 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 import java.io.IOException;
+import java.lang.management.ManagementFactory;
 import java.nio.ByteBuffer;
+import java.nio.channels.WritableByteChannel;
 
 import org.bluezoo.protobuf.ByteBufferChannel;
 import org.bluezoo.protobuf.ProtobufWriter;
@@ -345,6 +347,122 @@ public class ProtobufWriterTest {
         @Override
         public void writeTo(ProtobufWriter writer) throws IOException {
             writer.writeStringField(1, "test");
+        }
+    }
+
+    @Test
+    public void testNestedMessagesThreeLevels() throws IOException {
+        ByteBufferChannel channel = new ByteBufferChannel(64);
+        ProtobufWriter writer = new ProtobufWriter(channel);
+
+        // Two consecutive siblings at each level exercise reuse of any
+        // per-depth scratch state between messages.
+        for (int i = 0; i < 2; i++) {
+            writer.writeMessageField(1, outer -> {
+                outer.writeVarintField(1, 1);
+                outer.writeMessageField(2, middle -> {
+                    middle.writeVarintField(1, 2);
+                    middle.writeMessageField(3, inner -> inner.writeVarintField(1, 3));
+                    middle.writeVarintField(4, 4);
+                });
+                outer.writeVarintField(5, 5);
+            });
+        }
+
+        byte[] one = {
+            0x0A, 0x0E,             // field 1, LEN 14
+              0x08, 0x01,           // outer.1 = 1
+              0x12, 0x08,           // outer.2, LEN 8
+                0x08, 0x02,         // middle.1 = 2
+                0x1A, 0x02,         // middle.3, LEN 2
+                  0x08, 0x03,       // inner.1 = 3
+                0x20, 0x04,         // middle.4 = 4
+              0x28, 0x05            // outer.5 = 5
+        };
+        byte[] expected = new byte[one.length * 2];
+        System.arraycopy(one, 0, expected, 0, one.length);
+        System.arraycopy(one, 0, expected, one.length, one.length);
+        assertArrayEquals(expected, channel.toByteArray());
+    }
+
+    @Test
+    public void testMessageFieldReentrantOnOuterWriter() throws IOException {
+        // Content that (wrongly but legally) writes through the outer writer
+        // rather than the nested one must not corrupt the in-progress message.
+        ByteBufferChannel channel = new ByteBufferChannel(64);
+        ProtobufWriter writer = new ProtobufWriter(channel);
+
+        writer.writeMessageField(1, inner -> {
+            inner.writeVarintField(1, 1);
+            writer.writeMessageField(2, inner2 -> inner2.writeVarintField(1, 2));
+            inner.writeVarintField(3, 3);
+        });
+
+        // The re-entrant field lands in the outer stream first, ahead of
+        // the enclosing message, which still carries its own two fields.
+        byte[] expected = {
+            0x12, 0x02, 0x08, 0x02,             // field 2 { 1 = 2 }
+            0x0A, 0x04, 0x08, 0x01, 0x18, 0x03  // field 1 { 1 = 1, 3 = 3 }
+        };
+        assertArrayEquals(expected, channel.toByteArray());
+    }
+
+    @Test
+    public void testMessageFieldDoesNotAllocateLargeScratchPerMessage() throws IOException {
+        // Embedded messages used to allocate a 64KB scratch channel each.
+        com.sun.management.ThreadMXBean mx =
+                (com.sun.management.ThreadMXBean) ManagementFactory.getThreadMXBean();
+        long tid = Thread.currentThread().getId();
+
+        for (int i = 0; i < 50; i++) {
+            encodeSmallMessages();
+        }
+        long before = mx.getThreadAllocatedBytes(tid);
+        encodeSmallMessages();
+        long allocated = mx.getThreadAllocatedBytes(tid) - before;
+
+        // 100 messages x 64KB = 6.4MB before the fix; the output itself
+        // is only ~25KB.
+        assertTrue("allocated " + allocated + " bytes", allocated < 1024 * 1024);
+    }
+
+    private static void encodeSmallMessages() throws IOException {
+        ByteBufferChannel channel = new ByteBufferChannel(4096);
+        ProtobufWriter writer = new ProtobufWriter(channel);
+        for (int o = 0; o < 100; o++) {
+            writer.writeMessageField(1, inner -> {
+                for (int i = 0; i < 50; i++) {
+                    inner.writeVarintField(2, i);
+                }
+            });
+        }
+    }
+
+    // -- Channel failure tests --
+
+    @Test(timeout = 5000)
+    public void testNegativeChannelWriteThrows() {
+        WritableByteChannel eof = new WritableByteChannel() {
+            @Override
+            public int write(ByteBuffer src) {
+                return -1;
+            }
+
+            @Override
+            public boolean isOpen() {
+                return true;
+            }
+
+            @Override
+            public void close() {
+            }
+        };
+        ProtobufWriter writer = new ProtobufWriter(eof);
+        try {
+            writer.writeVarintField(1, 1);
+            fail("expected IOException");
+        } catch (IOException expected) {
+            // good: must not spin forever
         }
     }
 

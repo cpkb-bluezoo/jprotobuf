@@ -196,7 +196,8 @@ public class ByteBufferChannel implements WritableByteChannel {
         if (buffer.remaining() < additionalBytes) {
             int payloadEnd = buffer.position();
             int required = payloadEnd + additionalBytes;
-            int newCapacity = buffer.capacity();
+            // max: a zero-capacity buffer would otherwise never grow by doubling
+            int newCapacity = Math.max(buffer.capacity(), 1);
 
             while (newCapacity < required) {
                 newCapacity = newCapacity * 2;

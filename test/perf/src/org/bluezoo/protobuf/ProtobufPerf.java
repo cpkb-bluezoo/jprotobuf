@@ -64,6 +64,18 @@ public final class ProtobufPerf {
         });
 
         report("nested parse (200 x 100 msgs x 50 fields)", parseNs, bytes * 200L);
+
+        long encodeNs = timeNanos(() -> {
+            try {
+                for (int i = 0; i < 200; i++) {
+                    encodeNested(100, 50);
+                }
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        });
+
+        report("nested encode (200 x 100 msgs x 50 fields)", encodeNs, bytes * 200L);
     }
 
     private static void report(String label, long nanos, long totalBytes) {

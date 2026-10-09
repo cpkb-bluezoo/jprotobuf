@@ -23,6 +23,7 @@ package org.bluezoo.protobuf;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.channels.ClosedChannelException;
 import java.nio.channels.WritableByteChannel;
 import java.nio.charset.StandardCharsets;
 
@@ -66,9 +67,24 @@ public class ProtobufWriter {
      */
     public static final int WIRETYPE_I32 = 5;
 
+    /** Initial capacity of the scratch channel used for embedded messages. */
+    private static final int MESSAGE_SCRATCH_INITIAL_CAPACITY = 256;
+
+    /**
+     * Scratch channels that grew beyond this many bytes are discarded after
+     * use rather than retained, so one large message does not pin memory.
+     */
+    private static final int MESSAGE_SCRATCH_MAX_RETAINED = 64 * 1024;
+
     private final WritableByteChannel channel;
     private final ByteBuffer writeBuffer;
     private long bytesWritten;
+
+    // Reusable writer (and its backing channel) for the embedded message
+    // currently being built by writeMessageField(); one per nesting level.
+    private ByteBufferChannel messageChannel;
+    private ProtobufWriter messageWriter;
+    private boolean messageInProgress;
 
     /**
      * Creates a new ProtobufWriter that writes to the given channel.
@@ -348,19 +364,45 @@ public class ProtobufWriter {
             return;
         }
         
-        // Calculate message size by writing to a temporary buffer
-        ByteBufferChannel tempChannel = new ByteBufferChannel(64 * 1024); // 64KB initial
-        ProtobufWriter tempWriter = new ProtobufWriter(tempChannel);
-        content.writeTo(tempWriter);
+        // The wire format puts the length first, so build the content in a
+        // scratch buffer to learn its size. The scratch writer is reused
+        // across messages; if content re-enters this writer while a message
+        // is already being built, fall back to a fresh one.
+        ByteBufferChannel tempChannel;
+        ProtobufWriter tempWriter;
+        boolean reuse = !messageInProgress;
+        if (reuse) {
+            if (messageWriter == null) {
+                messageChannel = new ByteBufferChannel(MESSAGE_SCRATCH_INITIAL_CAPACITY);
+                messageWriter = new ProtobufWriter(messageChannel);
+            }
+            tempChannel = messageChannel;
+            tempWriter = messageWriter;
+            tempChannel.reset();
+            tempWriter.bytesWritten = 0;
+            messageInProgress = true;
+        } else {
+            tempChannel = new ByteBufferChannel(MESSAGE_SCRATCH_INITIAL_CAPACITY);
+            tempWriter = new ProtobufWriter(tempChannel);
+        }
+        try {
+            content.writeTo(tempWriter);
 
-        ByteBuffer messageData = tempChannel.toByteBuffer();
-        int messageSize = messageData.remaining();
-
-        writeBuffer.clear();
-        putTag(writeBuffer, fieldNumber, WIRETYPE_LEN);
-        putVarint(writeBuffer, messageSize);
-        flushWriteBuffer();
-        writeToChannel(messageData);
+            ByteBuffer messageData = tempChannel.toByteBuffer();
+            writeBuffer.clear();
+            putTag(writeBuffer, fieldNumber, WIRETYPE_LEN);
+            putVarint(writeBuffer, messageData.remaining());
+            flushWriteBuffer();
+            writeToChannel(messageData);
+        } finally {
+            if (reuse) {
+                messageInProgress = false;
+                if (tempChannel.size() > MESSAGE_SCRATCH_MAX_RETAINED) {
+                    messageChannel = null;
+                    messageWriter = null;
+                }
+            }
+        }
     }
 
     /**
@@ -442,8 +484,11 @@ public class ProtobufWriter {
             } else if (written == 0) {
                 // Non-blocking channel not ready, yield and retry
                 Thread.yield();
+            } else {
+                // A writable channel should never report end of stream;
+                // retrying would spin forever.
+                throw new ClosedChannelException();
             }
-            // written < 0 would indicate end of stream (shouldn't happen for writable)
         }
     }
 
