@@ -12,8 +12,12 @@
   <property name="java.source.version" value="21"/>
   <property name="java.target.version" value="21"/>
 
-  <property name="junit.jar" value="junit-4.13.1.jar"/>
-  <property name="hamcrest.jar" value="hamcrest-3.0.jar"/>
+  <!-- Test-only dependencies: downloaded from Maven Central by
+       resolve-test-deps, not kept in git. -->
+  <property name="junit.version" value="4.13.1"/>
+  <property name="hamcrest.version" value="3.0"/>
+  <property name="junit.jar" value="junit-${junit.version}.jar"/>
+  <property name="hamcrest.jar" value="hamcrest-${hamcrest.version}.jar"/>
 
   <target name="init">
     <tstamp/>
@@ -96,7 +100,23 @@
     <delete dir="${test}/junit/results"/>
   </target>
 
-  <target name="junit-build" depends="build">
+  <!-- Download test-only dependencies (JUnit, Hamcrest) into test/junit/lib/.
+       Not invoked by build/release; junit-build depends on this. -->
+  <target name="resolve-test-deps"
+          description="Download JUnit and Hamcrest into test/junit/lib/">
+    <mkdir dir="${test}/junit/lib"/>
+    <!-- Other versions left behind by an earlier pin go first -->
+    <delete quiet="true">
+      <fileset dir="${test}/junit/lib" includes="junit-*.jar" excludes="${junit.jar}"/>
+      <fileset dir="${test}/junit/lib" includes="hamcrest-*.jar" excludes="${hamcrest.jar}"/>
+    </delete>
+    <get src="https://repo1.maven.org/maven2/junit/junit/${junit.version}/junit-${junit.version}.jar"
+         dest="${test}/junit/lib/${junit.jar}" skipexisting="true"/>
+    <get src="https://repo1.maven.org/maven2/org/hamcrest/hamcrest/${hamcrest.version}/hamcrest-${hamcrest.version}.jar"
+         dest="${test}/junit/lib/${hamcrest.jar}" skipexisting="true"/>
+  </target>
+
+  <target name="junit-build" depends="build,resolve-test-deps">
     <mkdir dir="${test}/junit/classes"/>
     <javac srcdir="${test}/junit/src" destdir="${test}/junit/classes" debug="true"
            release="${java.release.version}"

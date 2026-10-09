@@ -55,6 +55,22 @@ import java.util.ResourceBundle;
  * remains in the buffer between position and limit. The caller should
  * call {@code compact()} before reading more data into the buffer.
  *
+ * <h3>Untrusted Input</h3>
+ * <p>A length-delimited field that is not an embedded message (bytes, a
+ * string, a packed field) is delivered only once all of it has been received,
+ * so the caller has to be able to buffer one whole field. The
+ * single-argument constructor places no limit on the size a field may
+ * declare: a peer can announce a multi-gigabyte field, and a caller that
+ * grows its buffer to fit will try to allocate it.
+ *
+ * <p>When parsing data from a source you do not trust, use
+ * {@link #ProtobufParser(ProtobufHandler, int, int)} and pass the largest
+ * field you are prepared to buffer as {@code maxLengthDelimitedSize}. A field
+ * declaring more is rejected as soon as its length prefix has been read,
+ * before any of its payload is buffered. The same limit applies to the
+ * declared length of embedded messages. Nesting is limited by
+ * {@code maxMessageDepth} (by default {@value #DEFAULT_MAX_MESSAGE_DEPTH}).
+ *
  * <h3>Underflow Handling</h3>
  * <p>When the parser cannot complete a field due to insufficient data,
  * it enters an underflow state. The next {@code receive()} call will
@@ -115,6 +131,11 @@ public class ProtobufParser {
 
     /**
      * Creates a new parser with the given handler and default limits.
+     *
+     * <p>The default places no limit on the size of a length-delimited
+     * field. For untrusted input use
+     * {@link #ProtobufParser(ProtobufHandler, int, int)} instead; see
+     * <em>Untrusted Input</em> in the class description.
      *
      * @param handler the handler to receive parse events
      */

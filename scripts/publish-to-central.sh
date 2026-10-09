@@ -100,8 +100,9 @@ cp "dist/jprotobuf-$VERSION-javadoc.jar" "$BUNDLE_DIR/"
 (
     cd "$BUNDLE_DIR"
     for f in *.jar *.pom; do
-        gpg --batch --local-user "$GPG_KEY_ID" --pinentry-mode loopback \
-            --passphrase "$GPG_PASSPHRASE" -ab "$f"
+        # Passphrase on stdin, not argv, so it never shows in a process listing
+        printf '%s' "$GPG_PASSPHRASE" | gpg --batch --local-user "$GPG_KEY_ID" \
+            --pinentry-mode loopback --passphrase-fd 0 -ab "$f"
         md5sum "$f" | cut -d' ' -f1 > "$f.md5"
         shasum -a 1 "$f" | cut -d' ' -f1 > "$f.sha1"
     done

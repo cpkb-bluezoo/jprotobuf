@@ -40,5 +40,5 @@ replay_pid*
 .project
 .settings/
 
-# Keep test JARs
-!test/junit/lib/*.jar
+# Test dependency jars are downloaded by 'ant resolve-test-deps' (see
+# test/junit/lib/README); *.jar above already ignores them

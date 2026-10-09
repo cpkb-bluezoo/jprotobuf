@@ -100,6 +100,10 @@ public interface ProtobufHandler {
      * The buffer is positioned at the start of the data and has exactly the
      * field's length remaining.
      *
+     * <p>The buffer is a view of the parser's input, not a copy. It is only
+     * valid until the caller next reuses or compacts the input buffer, so a
+     * handler that needs the content beyond this call must copy it.
+     *
      * @param fieldNumber the field number
      * @param data the field data (read-only view)
      */

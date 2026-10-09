@@ -62,6 +62,29 @@ while (channel.read(buffer) > 0) {
 parser.close();
 ```
 
+## Parsing untrusted input
+
+A bytes or string field is delivered only once it has been received in full,
+so the caller must be able to buffer one whole field. By default the parser
+accepts any declared size: a peer that announces a multi-gigabyte field makes a
+caller that grows its buffer to fit allocate it. For data from a source you do
+not trust, set a limit on the largest field you will buffer (and, if the
+default of 100 is too generous, on nesting depth):
+
+```java
+ProtobufParser parser = new ProtobufParser(
+        handler,
+        32,             // maxMessageDepth
+        1 << 20);       // maxLengthDelimitedSize: reject fields over 1 MiB
+```
+
+A field declaring more than the limit is rejected as soon as its length prefix
+has been read, before any of its payload is buffered. The limit also applies
+to the declared length of embedded messages.
+
+The `ByteBuffer` passed to `handleBytes` is a read-only view of your input
+buffer, not a copy. Copy anything you need to keep after the call returns.
+
 ## Maven
 
 Artifacts are published to [Maven Central](https://central.sonatype.com/) and
@@ -84,7 +107,9 @@ ant test
 ant perf    # optional ad-hoc throughput harness (not a CI gate)
 ```
 
-Requires JDK 21+.
+Requires JDK 21+. The first `ant test` downloads the test-only dependencies
+(JUnit 4 and Hamcrest) from Maven Central into `test/junit/lib/`; they are not
+kept in git, and nothing is downloaded to build or use the library itself.
 
 ## License
 

@@ -1,0 +1,14 @@
+Test-only dependency jars for the JUnit 4 unit tests.
+
+**Not in git.** Only this README is tracked; the jars are gitignored. They are
+downloaded from Maven Central into this directory by `ant resolve-test-deps`,
+which runs automatically from `junit-build` (so `ant junit-test` / `ant test`
+fetch them on first use). A plain `ant build` or `ant release` does not
+download anything.
+
+Version pins: `junit.version` and `hamcrest.version` in `build.xml`.
+
+| Jar | Source |
+|-----|--------|
+| junit-* | Maven Central (junit:junit) |
+| hamcrest-* | Maven Central (org.hamcrest:hamcrest) |
