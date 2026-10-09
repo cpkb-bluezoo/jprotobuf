@@ -94,9 +94,15 @@ public class ProtobufParser {
     private final int maxMessageDepth;
     private final int maxLengthDelimitedSize;
 
-    // Message nesting - remaining payload bytes at each level (primitive stack)
-    private int[] messageRemaining = new int[4];
+    // Message nesting - at each level, the stream offset at which that
+    // message ends (primitive stack). Offsets are measured against
+    // the running consumed count, so completing a field is a single addition no
+    // matter how deeply it is nested.
+    private long[] messageEnd = new long[4];
     private int messageDepth;
+
+    // Bytes of fully-parsed fields since construction or reset()
+    private long consumed;
 
     // Underflow state
     private boolean underflow;
@@ -167,10 +173,7 @@ public class ProtobufParser {
 
         while (data.hasRemaining()) {
             // Check if we've completed any nested messages
-            while (messageDepth > 0 && messageRemaining[messageDepth - 1] <= 0) {
-                messageDepth--;
-                handler.endMessage();
-            }
+            endCompletedMessages();
 
             // If no more data after closing messages, we're done
             if (!data.hasRemaining()) {
@@ -257,13 +260,13 @@ public class ProtobufParser {
                     ensureLengthDelimitedPayloadFits(data, fieldStart, length);
 
                     if (handler.isMessage(fieldNumber)) {
-                        // Embedded message - decrement parent levels by tag + length prefix
-                        // BEFORE pushing the new message (so we don't wrongly decrement it)
-                        bytesConsumed = data.position() - fieldStart;
-                        decrementMessageBytes(bytesConsumed);
-                        bytesConsumed = 0; // Already decremented, don't do it again below
+                        // Embedded message - count the tag + length prefix against
+                        // the parent levels BEFORE pushing the new message, whose
+                        // end offset is measured from the end of that prefix
+                        consumed += data.position() - fieldStart;
+                        bytesConsumed = 0; // Already counted, don't do it again below
                         handler.startMessage(fieldNumber);
-                        pushMessageRemaining(length);
+                        pushMessageEnd(length);
                     } else {
                         // Bytes/string - need all content available
                         if (data.remaining() < length) {
@@ -290,15 +293,12 @@ public class ProtobufParser {
                     throw new ProtobufParseException(msg);
             }
 
-            // Decrement bytes remaining in nested messages
-            decrementMessageBytes(bytesConsumed);
+            // Count the field against all enclosing messages
+            consumed += bytesConsumed;
         }
 
         // Check for any completed messages at the end
-        while (messageDepth > 0 && messageRemaining[messageDepth - 1] <= 0) {
-            messageDepth--;
-            handler.endMessage();
-        }
+        endCompletedMessages();
     }
 
     /**
@@ -324,6 +324,7 @@ public class ProtobufParser {
      */
     public void reset() {
         messageDepth = 0;
+        consumed = 0;
         underflow = false;
     }
 
@@ -397,7 +398,17 @@ public class ProtobufParser {
         if (messageDepth == 0) {
             return Integer.MAX_VALUE;
         }
-        return messageRemaining[messageDepth - 1];
+        // Bounded by the declared length of the innermost message, which
+        // was itself checked to fit an int when it was pushed
+        return (int) (messageEnd[messageDepth - 1] - consumed);
+    }
+
+    /** Ends every open message whose last byte has been consumed. */
+    private void endCompletedMessages() {
+        while (messageDepth > 0 && consumed >= messageEnd[messageDepth - 1]) {
+            messageDepth--;
+            handler.endMessage();
+        }
     }
 
     /**
@@ -451,30 +462,17 @@ public class ProtobufParser {
         return result;
     }
 
-    private void pushMessageRemaining(int length) throws ProtobufParseException {
+    private void pushMessageEnd(int length) throws ProtobufParseException {
         if (messageDepth >= maxMessageDepth) {
             String msg = MessageFormat.format(
                     L10N.getString("err.message_depth_exceeded"), maxMessageDepth);
             throw new ProtobufParseException(msg);
         }
-        if (messageDepth == messageRemaining.length) {
-            int[] grown = new int[messageDepth * 2];
-            System.arraycopy(messageRemaining, 0, grown, 0, messageDepth);
-            messageRemaining = grown;
+        if (messageDepth == messageEnd.length) {
+            long[] grown = new long[messageDepth * 2];
+            System.arraycopy(messageEnd, 0, grown, 0, messageDepth);
+            messageEnd = grown;
         }
-        messageRemaining[messageDepth++] = length;
-    }
-
-    /**
-     * Decrements the remaining byte count for all nested messages.
-     * When bytes are consumed, they count against all enclosing message boundaries.
-     */
-    private void decrementMessageBytes(int count) {
-        if (messageDepth == 0 || count == 0) {
-            return;
-        }
-        for (int i = 0; i < messageDepth; i++) {
-            messageRemaining[i] -= count;
-        }
+        messageEnd[messageDepth++] = consumed + length;
     }
 }

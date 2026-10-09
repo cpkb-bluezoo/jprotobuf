@@ -23,6 +23,39 @@ public final class ProtobufPerf {
     public static void main(String[] args) throws Exception {
         benchFlat();
         benchNested();
+        benchDeep();
+    }
+
+    private static void benchDeep() throws Exception {
+        ByteBuffer sample = encodeDeep(100, 2000);
+        int bytes = sample.remaining();
+
+        long parseNs = timeNanos(() -> {
+            try {
+                parseNested(sample, 200);
+            } catch (Exception e) {
+                throw new RuntimeException(e);
+            }
+        });
+
+        report("deep parse (200 x depth 100 x 2000 fields)", parseNs, bytes * 200L);
+    }
+
+    private static ByteBuffer encodeDeep(int depth, int leafFields) throws IOException {
+        ByteBufferChannel ch = new ByteBufferChannel(65536);
+        writeDeep(new ProtobufWriter(ch), depth, leafFields);
+        return ch.toByteBuffer();
+    }
+
+    private static void writeDeep(ProtobufWriter w, int depth, int leafFields) throws IOException {
+        if (depth == 0) {
+            for (int i = 0; i < leafFields; i++) {
+                w.writeVarintField(2, i);
+                w.writeStringField(3, "x");
+            }
+            return;
+        }
+        w.writeMessageField(1, inner -> writeDeep(inner, depth - 1, leafFields));
     }
 
     private static void benchFlat() throws Exception {

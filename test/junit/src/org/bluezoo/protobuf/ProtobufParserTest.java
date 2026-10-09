@@ -10,6 +10,7 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Random;
 
 import org.bluezoo.protobuf.ByteBufferChannel;
 import org.bluezoo.protobuf.DefaultProtobufHandler;
@@ -487,6 +488,240 @@ public class ProtobufParserTest {
         parser.close();
         assertEquals(1, handler.varints.size());
         assertEquals(99L, (long) handler.varints.get(0).value);
+    }
+
+    // -- Nested message bounds tests --
+
+    /** Handler that logs every event as a string, with fields 10-19 as messages. */
+    private static class EventLog extends DefaultProtobufHandler {
+        final List<String> events = new ArrayList<>();
+
+        @Override
+        public boolean isMessage(int fieldNumber) {
+            return fieldNumber >= 10 && fieldNumber < 20;
+        }
+
+        @Override
+        public void startMessage(int fieldNumber) {
+            events.add("S" + fieldNumber);
+        }
+
+        @Override
+        public void endMessage() {
+            events.add("E");
+        }
+
+        @Override
+        public void handleVarint(int fieldNumber, long value) {
+            events.add("V" + fieldNumber + "=" + value);
+        }
+
+        @Override
+        public void handleFixed64(int fieldNumber, long value) {
+            events.add("L" + fieldNumber + "=" + value);
+        }
+
+        @Override
+        public void handleFixed32(int fieldNumber, int value) {
+            events.add("I" + fieldNumber + "=" + value);
+        }
+
+        @Override
+        public void handleBytes(int fieldNumber, ByteBuffer data) {
+            StringBuilder sb = new StringBuilder("B").append(fieldNumber).append('=');
+            while (data.hasRemaining()) {
+                sb.append(String.format("%02x", data.get()));
+            }
+            events.add(sb.toString());
+        }
+    }
+
+    /** Writes a random message tree, logging the events the parser must emit. */
+    private static void generate(Random rnd, ProtobufWriter w, int depth,
+            int maxDepth, List<String> events) throws IOException {
+        int fields = rnd.nextInt(6);
+        for (int i = 0; i < fields; i++) {
+            int kind = rnd.nextInt(depth < maxDepth ? 6 : 5);
+            int f = 1 + rnd.nextInt(9);
+            switch (kind) {
+                case 0: {
+                    long v = rnd.nextBoolean() ? rnd.nextInt(300) : rnd.nextLong();
+                    w.writeVarintField(f, v);
+                    events.add("V" + f + "=" + v);
+                    break;
+                }
+                case 1: {
+                    long v = rnd.nextLong();
+                    w.writeFixed64Field(f, v);
+                    events.add("L" + f + "=" + v);
+                    break;
+                }
+                case 2: {
+                    int v = rnd.nextInt();
+                    w.writeFixed32Field(f, v);
+                    events.add("I" + f + "=" + v);
+                    break;
+                }
+                case 3:
+                case 4: {
+                    byte[] b = new byte[rnd.nextInt(4) == 0 ? rnd.nextInt(300) : rnd.nextInt(8)];
+                    rnd.nextBytes(b);
+                    w.writeBytesField(f, b);
+                    StringBuilder sb = new StringBuilder("B").append(f).append('=');
+                    for (byte x : b) {
+                        sb.append(String.format("%02x", x));
+                    }
+                    events.add(sb.toString());
+                    break;
+                }
+                default: {
+                    int mf = 10 + rnd.nextInt(10);
+                    events.add("S" + mf);
+                    w.writeMessageField(mf, inner -> generate(rnd, inner, depth + 1, maxDepth, events));
+                    events.add("E");
+                }
+            }
+        }
+    }
+
+    private static List<String> parseChunked(byte[] data, Random rnd, int maxChunk)
+            throws ProtobufParseException {
+        EventLog log = new EventLog();
+        ProtobufParser parser = new ProtobufParser(log, 1000, ProtobufParser.UNLIMITED_LENGTH_DELIMITED);
+        ByteBuffer buf = ByteBuffer.allocate(data.length + 1);
+        int off = 0;
+        while (off < data.length) {
+            int n = Math.min(data.length - off, 1 + (maxChunk == 1 ? 0 : rnd.nextInt(maxChunk)));
+            buf.put(data, off, n);
+            off += n;
+            buf.flip();
+            parser.receive(buf);
+            buf.compact();
+        }
+        parser.close();
+        return log.events;
+    }
+
+    @Test
+    public void testRandomNestedMessagesAcrossArbitraryChunking() throws Exception {
+        Random rnd = new Random(20260401L);
+        for (int round = 0; round < 300; round++) {
+            List<String> expected = new ArrayList<>();
+            ByteBufferChannel ch = new ByteBufferChannel(64);
+            generate(rnd, new ProtobufWriter(ch), 0, 1 + rnd.nextInt(12), expected);
+            byte[] data = ch.toByteArray();
+
+            for (int maxChunk : new int[] {1, 2, 7, 64, data.length + 1}) {
+                assertEquals("round " + round + " maxChunk " + maxChunk,
+                        expected, parseChunked(data, rnd, maxChunk));
+            }
+        }
+    }
+
+    @Test
+    public void testDeeplyNestedMessagesCloseTogether() throws Exception {
+        // 60 levels, a field at each level after its child, and a field at
+        // depth 0 afterwards: all 60 endMessage events must fire in order.
+        int levels = 60;
+        List<String> expected = new ArrayList<>();
+        ByteBufferChannel ch = new ByteBufferChannel(64);
+        ProtobufWriter w = new ProtobufWriter(ch);
+        nest(w, levels, expected);
+        w.writeVarintField(1, 7);
+        expected.add("V1=7");
+
+        assertEquals(expected, parseChunked(ch.toByteArray(), new Random(1), 1));
+        assertEquals(expected, parseChunked(ch.toByteArray(), new Random(2), 1000));
+    }
+
+    private static void nest(ProtobufWriter w, int levels, List<String> events) throws IOException {
+        if (levels == 0) {
+            w.writeVarintField(2, levels);
+            events.add("V2=0");
+            return;
+        }
+        events.add("S10");
+        w.writeMessageField(10, inner -> {
+            nest(inner, levels - 1, events);
+            inner.writeVarintField(3, levels);
+            events.add("V3=" + levels);
+        });
+        events.add("E");
+    }
+
+    @Test
+    public void testEmptyEmbeddedMessages() throws Exception {
+        byte[] data = {
+            0x52, 0x00,              // field 10, empty
+            0x52, 0x02, 0x5A, 0x00,  // field 10 { field 11 empty }
+            0x08, 0x05               // field 1 = 5 at depth 0
+        };
+        assertEquals(java.util.Arrays.asList("S10", "E", "S10", "S11", "E", "E", "V1=5"),
+                parseChunked(data, new Random(3), 1));
+    }
+
+    @Test
+    public void testInnerMessageLongerThanParentBudgetRejected() throws Exception {
+        // field 10 len 4 { field 11 len 9 ... }: inner claims more than the
+        // 2 bytes left in its parent.
+        EventLog log = new EventLog();
+        ProtobufParser parser = new ProtobufParser(log);
+        try {
+            parser.receive(ByteBuffer.wrap(new byte[] {
+                0x52, 0x04, 0x5A, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+            }));
+            fail("Expected ProtobufParseException");
+        } catch (ProtobufParseException e) {
+            assertTrue(e.getMessage().contains("embedded message"));
+        }
+    }
+
+    @Test
+    public void testVarintRunningPastInnermostBudgetRejected() throws Exception {
+        // The inner message has two bytes: tag 0x08 and a varint byte 0x80
+        // with its continuation bit set. A following byte must not be
+        // consumed as part of the varint, even though the parent and the
+        // buffer both have room for it.
+        EventLog log = new EventLog();
+        ProtobufParser parser = new ProtobufParser(log);
+        try {
+            parser.receive(ByteBuffer.wrap(new byte[] {
+                0x52, 0x05, 0x5A, 0x02, 0x08, (byte) 0x80, 0x01
+            }));
+            fail("Expected ProtobufParseException");
+        } catch (ProtobufParseException e) {
+            assertTrue(e.getMessage().contains("embedded message"));
+        }
+    }
+
+    @Test
+    public void testTruncatedEmbeddedMessageReportedOnClose() throws Exception {
+        EventLog log = new EventLog();
+        ProtobufParser parser = new ProtobufParser(log);
+        parser.receive(ByteBuffer.wrap(new byte[] {
+            0x52, 0x0A, 0x5A, 0x04, 0x08, 0x01   // declared 10, only 4 present
+        }));
+        assertEquals(java.util.Arrays.asList("S10", "S11", "V1=1"), log.events);
+        try {
+            parser.close();
+            fail("Expected ProtobufParseException");
+        } catch (ProtobufParseException e) {
+            // two messages still open
+        }
+    }
+
+    @Test
+    public void testResetInsideNestedMessage() throws Exception {
+        EventLog log = new EventLog();
+        ProtobufParser parser = new ProtobufParser(log);
+        parser.receive(ByteBuffer.wrap(new byte[] {0x52, 0x08, 0x5A, 0x04, 0x08, 0x01})); // partial
+        parser.reset();
+        log.events.clear();
+
+        // A fresh, complete document must parse as if new.
+        parser.receive(ByteBuffer.wrap(new byte[] {0x52, 0x02, 0x08, 0x09, 0x10, 0x03}));
+        parser.close();
+        assertEquals(java.util.Arrays.asList("S10", "V1=9", "E", "V2=3"), log.events);
     }
 
     // -- Helper methods --
