@@ -1,7 +1,7 @@
 jprotobuf ChangeLog
 ===================
 
-Version 1.2.0 (unreleased)
+Version 1.2.0 (2026-11-01)
 --------------------------
 
 Streaming of length-delimited fields. The API change is additive: existing

@@ -149,7 +149,7 @@ coordinates; GitHub requires authentication to resolve).
 <dependency>
     <groupId>org.bluezoo</groupId>
     <artifactId>jprotobuf</artifactId>
-    <version>1.1.1</version>
+    <version>1.2.0</version>
 </dependency>
 ```
 
