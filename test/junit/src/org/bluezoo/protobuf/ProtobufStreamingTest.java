@@ -219,6 +219,32 @@ public class ProtobufStreamingTest {
         assertEquals(Arrays.asList("S2:5", "V1=1"), log.eventsWithoutContent());
     }
 
+    @Test
+    public void testHandlerThatOnlyOptsInSkipsTheField() throws Exception {
+        // isStreaming alone: the default bytesContent consumes every piece,
+        // so a field of any size is skipped and parsing carries on.
+        final List<String> events = new ArrayList<>();
+        DefaultProtobufHandler handler = new DefaultProtobufHandler() {
+            @Override
+            public boolean isStreaming(int fieldNumber) {
+                return fieldNumber == 2;
+            }
+
+            @Override
+            public void handleVarint(int fieldNumber, long value) {
+                events.add("V" + fieldNumber + "=" + value);
+            }
+        };
+        byte[] payload = randomBytes(new Random(8), 500);
+        byte[] data = concat(fieldHeader(2, payload.length), payload, new byte[] {0x08, 0x03});
+
+        ProtobufParser parser = new ProtobufParser(handler);
+        feed(parser, data, 20);
+        parser.close();
+
+        assertEquals(Arrays.asList("V1=3"), events);
+    }
+
     // -- Parser: limits --
 
     @Test
@@ -357,6 +383,21 @@ public class ProtobufStreamingTest {
         writer.writeBytesContent(ByteBuffer.wrap(new byte[] {1, 2, 3}));
         writer.writeEndBytes();
         writer.writeVarintField(2, 1); // fine again
+    }
+
+    @Test
+    public void testFieldLeftOpenInEmbeddedMessageRefusedAndWriterStillUsable() throws Exception {
+        ByteBufferChannel channel = new ByteBufferChannel(64);
+        final ProtobufWriter writer = new ProtobufWriter(channel);
+        try {
+            writer.writeMessageField(1, inner -> inner.writeStartBytes(2, 5));
+            fail("expected IllegalStateException");
+        } catch (IllegalStateException e) {
+            // expected
+        }
+        // The scratch writer the failed message used must not stay open
+        writer.writeMessageField(1, inner -> inner.writeVarintField(2, 7));
+        assertArrayEquals(new byte[] {0x0A, 0x02, 0x10, 0x07}, channel.toByteArray());
     }
 
     @Test
