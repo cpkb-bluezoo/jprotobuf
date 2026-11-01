@@ -34,8 +34,9 @@ import java.nio.ByteBuffer;
  * <ul>
  *   <li>VARINT (0) → {@link #handleVarint(int, long)}</li>
  *   <li>I64 (1) → {@link #handleFixed64(int, long)}</li>
- *   <li>LEN (2) → {@link #handleBytes(int, ByteBuffer)} or
- *                 {@link #startMessage(int)}/{@link #endMessage()}</li>
+ *   <li>LEN (2) → {@link #handleBytes(int, ByteBuffer)},
+ *                 {@link #startBytes(int, int)}/{@link #bytesContent(ByteBuffer)}/{@link #endBytes()}
+ *                 or {@link #startMessage(int)}/{@link #endMessage()}</li>
  *   <li>I32 (5) → {@link #handleFixed32(int, int)}</li>
  * </ul>
  *
@@ -119,6 +120,81 @@ public interface ProtobufHandler {
      * @return true if this field is an embedded message
      */
     boolean isMessage(int fieldNumber);
+
+    /**
+     * Returns true if the given length-delimited field should be streamed
+     * rather than delivered whole.
+     *
+     * <p>A streamed field is not buffered by the parser. It is reported as
+     * {@link #startBytes(int, int)}, any number of
+     * {@link #bytesContent(ByteBuffer)} pieces and {@link #endBytes()}, in
+     * place of {@link #handleBytes(int, ByteBuffer)}, so the caller's input
+     * buffer need not be able to hold it and the field can be larger than
+     * memory. Use it for large bytes or string fields.
+     *
+     * <p>The parser asks after {@link #isMessage(int)}, which takes
+     * precedence. The default is false, so a handler that does not override
+     * this receives every field through {@code handleBytes} as before.
+     *
+     * @param fieldNumber the field number
+     * @return true if this field is to be streamed
+     */
+    default boolean isStreaming(int fieldNumber) {
+        return false;
+    }
+
+    /**
+     * Called when a streamed length-delimited field begins.
+     *
+     * <p>The payload follows as zero or more {@link #bytesContent(ByteBuffer)}
+     * calls and then {@link #endBytes()}. An empty field has no content
+     * calls.
+     *
+     * <p>The parser's {@code maxLengthDelimitedSize} does not apply to a
+     * streamed field, since the parser holds none of it. A handler that
+     * accumulates the content should check {@code length} here.
+     *
+     * @param fieldNumber the field number
+     * @param length the whole length of the payload, in bytes
+     */
+    default void startBytes(int fieldNumber, int length) {
+        // No-op by default
+    }
+
+    /**
+     * Called with a piece of the payload of the field most recently started
+     * by {@link #startBytes(int, int)}.
+     *
+     * <p>The piece is a read-only view of the bytes the parser was given, not
+     * a copy, and is valid only for the duration of the call. Pieces are as
+     * large as what the caller's buffer holds, never more than what is left
+     * of the field.
+     *
+     * <p><b>What the handler reads, by advancing the buffer's position, is
+     * consumed. What it leaves is offered again at the front of the next
+     * piece.</b> A handler that copies or forwards the piece should read all
+     * of it. One that needs a whole token to make progress, such as a foreign
+     * parser fed from the piece, reads what that parser consumed and leaves
+     * its unfinished tail. When bytes are left, the parser stops until the
+     * caller supplies more data, so the caller's buffer must be able to hold
+     * them together with some more. Whatever the handler leaves of the last
+     * piece of the field is dropped.
+     *
+     * <p>The default consumes the whole piece, discarding the payload.
+     *
+     * @param data the piece of the payload
+     */
+    default void bytesContent(ByteBuffer data) {
+        data.position(data.limit());
+    }
+
+    /**
+     * Called when the payload of the field started by
+     * {@link #startBytes(int, int)} is complete.
+     */
+    default void endBytes() {
+        // No-op by default
+    }
 
     /**
      * Called when parsing begins for an embedded message.

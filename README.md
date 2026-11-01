@@ -32,6 +32,8 @@ The jar itself is tiny (~14 KB), with no transitive dependencies.
   buffer boundaries
 - **Embedded messages** — nested message boundaries tracked by the parser when
   the handler identifies message fields
+- **Streaming** — a bytes or string field of any size can be passed through in
+  pieces, in and out, without buffering it
 
 ## Encoding
 
@@ -62,10 +64,60 @@ while (channel.read(buffer) > 0) {
 parser.close();
 ```
 
+## Streaming large fields
+
+Normally a bytes or string field is delivered once it has been received in full.
+A handler can ask for chosen fields to be streamed instead, so that a field
+larger than the input buffer, or than memory, can be handled:
+
+```java
+ProtobufParser parser = new ProtobufParser(new DefaultProtobufHandler() {
+    @Override
+    public boolean isStreaming(int fieldNumber) {
+        return fieldNumber == 3;                 // the attachment
+    }
+
+    @Override
+    public void startBytes(int fieldNumber, int length) {
+        // the whole length is known up front
+    }
+
+    @Override
+    public void bytesContent(ByteBuffer data) {
+        out.write(data);                         // consumes the piece
+    }
+
+    @Override
+    public void endBytes() {
+    }
+});
+```
+
+A piece is a read-only view of the parser's input, not a copy. What the handler
+reads by advancing the buffer's position is consumed; what it leaves comes back
+at the front of the next piece, so a handler that feeds another parser can leave
+that parser's unfinished token. When bytes are left the parser waits for more
+data, so keep room in the input buffer for them as well as for a whole scalar
+field. Fields not named by `isStreaming` still arrive through `handleBytes`.
+
+The writer mirrors this. The length goes first on the wire, so it is declared up
+front and the content must match it:
+
+```java
+writer.writeStartBytes(3, (int) Files.size(path));
+while (file.read(chunk) >= 0) {
+    chunk.flip();
+    writer.writeBytesContent(chunk);             // writes all of it
+    chunk.clear();
+}
+writer.writeEndBytes();
+```
+
 ## Parsing untrusted input
 
-A bytes or string field is delivered only once it has been received in full,
-so the caller must be able to buffer one whole field. By default the parser
+Unless the handler streams it (see above), a bytes or string field is delivered
+only once it has been received in full, so the caller must be able to buffer
+one whole field. By default the parser
 accepts any declared size: a peer that announces a multi-gigabyte field makes a
 caller that grows its buffer to fit allocate it. For data from a source you do
 not trust, set a limit on the largest field you will buffer (and, if the
@@ -80,7 +132,9 @@ ProtobufParser parser = new ProtobufParser(
 
 A field declaring more than the limit is rejected as soon as its length prefix
 has been read, before any of its payload is buffered. The limit also applies
-to the declared length of embedded messages.
+to the declared length of embedded messages. It does not apply to a streamed
+field, which the parser does not buffer; a handler that accumulates one should
+check the length it is given in `startBytes`.
 
 The `ByteBuffer` passed to `handleBytes` is a read-only view of your input
 buffer, not a copy. Copy anything you need to keep after the call returns.

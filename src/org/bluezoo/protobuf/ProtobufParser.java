@@ -71,11 +71,25 @@ import java.util.ResourceBundle;
  * declared length of embedded messages. Nesting is limited by
  * {@code maxMessageDepth} (by default {@value #DEFAULT_MAX_MESSAGE_DEPTH}).
  *
+ * <h3>Streaming Large Fields</h3>
+ * <p>A handler can ask for a length-delimited field to be streamed instead
+ * ({@link ProtobufHandler#isStreaming(int)}). The parser then holds none of
+ * it: the handler is told the length with
+ * {@link ProtobufHandler#startBytes(int, int)}, is given the payload in
+ * pieces as the caller's buffer fills with
+ * {@link ProtobufHandler#bytesContent(ByteBuffer)}, and is told it is
+ * complete with {@link ProtobufHandler#endBytes()}. The caller's buffer need
+ * only be big enough for one scalar field and the largest tail a handler
+ * leaves unconsumed, however long the field. The limit on declared
+ * length-delimited sizes does not apply to a streamed field.
+ *
  * <h3>Underflow Handling</h3>
  * <p>When the parser cannot complete a field due to insufficient data,
  * it enters an underflow state. The next {@code receive()} call will
  * attempt to parse from the same position. If {@code close()} is called
- * while in underflow state, an exception is thrown.
+ * while in underflow state, an exception is thrown. The parser is also in
+ * underflow state while a streamed field is incomplete, though it holds no
+ * bytes of it, unless the handler left some in the buffer.
  *
  * @author <a href='mailto:dog@gnu.org'>Chris Burdess</a>
  * @see ProtobufHandler
@@ -119,6 +133,10 @@ public class ProtobufParser {
 
     // Bytes of fully-parsed fields since construction or reset()
     private long consumed;
+
+    // Payload bytes of the streamed field in progress that the handler has
+    // not yet consumed; zero when no streamed field is open.
+    private int streamRemaining;
 
     // Underflow state
     private boolean underflow;
@@ -193,6 +211,16 @@ public class ProtobufParser {
         underflow = false;
 
         while (data.hasRemaining()) {
+            if (streamRemaining > 0) {
+                if (!deliverBytes(data)) {
+                    // The handler left bytes: they stay in the buffer for the
+                    // caller to compact, and come back with more data
+                    underflow = true;
+                    return;
+                }
+                continue;
+            }
+
             // Check if we've completed any nested messages
             endCompletedMessages();
 
@@ -286,14 +314,29 @@ public class ProtobufParser {
                         throw new ProtobufParseException(msg);
                     }
                     int length = (int) lengthValue;
-                    if (length > maxLengthDelimitedSize) {
+                    boolean isMessage = handler.isMessage(fieldNumber);
+                    boolean isStreaming = !isMessage && handler.isStreaming(fieldNumber);
+                    // The limit is what the caller will buffer; a streamed
+                    // field is never buffered
+                    if (length > maxLengthDelimitedSize && !isStreaming) {
                         String msg = MessageFormat.format(
                                 L10N.getString("err.length_delimited_too_large"), length);
                         throw new ProtobufParseException(msg);
                     }
                     ensureLengthDelimitedPayloadFits(data, fieldStart, length);
 
-                    if (handler.isMessage(fieldNumber)) {
+                    if (isStreaming) {
+                        // Count the tag + length prefix now; the payload is
+                        // counted as the handler consumes it
+                        consumed += data.position() - fieldStart;
+                        bytesConsumed = 0;
+                        handler.startBytes(fieldNumber, length);
+                        if (length == 0) {
+                            handler.endBytes();
+                        } else {
+                            streamRemaining = length;
+                        }
+                    } else if (isMessage) {
                         // Embedded message - count the tag + length prefix against
                         // the parent levels BEFORE pushing the new message, whose
                         // end offset is measured from the end of that prefix
@@ -333,6 +376,11 @@ public class ProtobufParser {
 
         // Check for any completed messages at the end
         endCompletedMessages();
+
+        // Nothing is held, but the field is not finished
+        if (streamRemaining > 0) {
+            underflow = true;
+        }
     }
 
     /**
@@ -341,7 +389,7 @@ public class ProtobufParser {
      * @throws ProtobufParseException if in underflow state or unclosed messages
      */
     public void close() throws ProtobufParseException {
-        if (underflow) {
+        if (underflow || streamRemaining > 0) {
             throw new ProtobufParseException(L10N.getString("err.incomplete_field"));
         }
         if (messageDepth > 0) {
@@ -359,10 +407,42 @@ public class ProtobufParser {
     public void reset() {
         messageDepth = 0;
         consumed = 0;
+        streamRemaining = 0;
         underflow = false;
     }
 
     // -- Private helper methods --
+
+    /**
+     * Offers the handler the next piece of a streamed field: all of what the
+     * buffer holds, up to the end of the field.
+     *
+     * @return false if the handler left bytes of a piece that does not end
+     *     the field (they are still in the buffer, and the parser must wait
+     *     for more); true otherwise
+     */
+    private boolean deliverBytes(ByteBuffer data) {
+        int start = data.position();
+        int available = Math.min(streamRemaining, data.remaining());
+        ByteBuffer slice = data.slice();
+        slice.limit(available);
+        ByteBuffer piece = slice.asReadOnlyBuffer();
+        handler.bytesContent(piece);
+
+        if (available == streamRemaining) {
+            // The last piece: whatever the handler left is dropped
+            data.position(start + available);
+            consumed += available;
+            streamRemaining = 0;
+            handler.endBytes();
+            return true;
+        }
+        int used = piece.position();
+        data.position(start + used);
+        consumed += used;
+        streamRemaining -= used;
+        return used == available;
+    }
 
     /**
      * Attempts to read a varint from the buffer.

@@ -100,6 +100,11 @@ public class ProtobufWriter {
     private ProtobufWriter messageWriter;
     private boolean messageInProgress;
 
+    // A length-delimited field begun by writeStartBytes() and not yet ended,
+    // and how many of its declared payload bytes are still to be written.
+    private boolean streamOpen;
+    private int streamRemaining;
+
     /**
      * Creates a new ProtobufWriter that writes to the given channel.
      *
@@ -424,6 +429,7 @@ public class ProtobufWriter {
             tempWriter = messageWriter;
             tempChannel.reset();
             tempWriter.bytesWritten = 0;
+            tempWriter.streamOpen = false;
             messageInProgress = true;
         } else {
             tempChannel = new ByteBufferChannel(MESSAGE_SCRATCH_INITIAL_CAPACITY);
@@ -431,6 +437,9 @@ public class ProtobufWriter {
         }
         try {
             content.writeTo(tempWriter);
+            if (tempWriter.streamOpen) {
+                throw new IllegalStateException("bytes field left open in message");
+            }
 
             ByteBuffer messageData = tempChannel.toByteBuffer();
             writeBuffer.clear();
@@ -447,6 +456,82 @@ public class ProtobufWriter {
                 }
             }
         }
+    }
+
+    /**
+     * Begins a length-delimited field whose payload is written in pieces,
+     * for content too large to hold as one {@code byte[]}.
+     *
+     * <p>The wire format puts the length first, so it must be declared here.
+     * Write exactly that many bytes with
+     * {@link #writeBytesContent(ByteBuffer)}, then call
+     * {@link #writeEndBytes()}. Until then no other field can be written to
+     * this writer. The bytes are the same as {@link #writeBytesField} would
+     * write for the same content.
+     *
+     * @param fieldNumber the field number
+     * @param length the whole length of the payload, in bytes
+     * @throws IllegalArgumentException if length is negative
+     * @throws IllegalStateException if a field is already open
+     * @throws IOException if an I/O error occurs
+     */
+    public void writeStartBytes(int fieldNumber, int length) throws IOException {
+        if (length < 0) {
+            throw new IllegalArgumentException("length");
+        }
+        writeBuffer.clear();
+        putTag(writeBuffer, fieldNumber, WIRETYPE_LEN);
+        putVarint(writeBuffer, length);
+        flushWriteBuffer();
+        streamOpen = true;
+        streamRemaining = length;
+    }
+
+    /**
+     * Writes a piece of the payload of the field begun by
+     * {@link #writeStartBytes(int, int)}.
+     *
+     * <p>All of the buffer's remaining bytes are written, blocking as
+     * {@link #writeBytesField} does, and the buffer's position is advanced
+     * past them. A piece longer than what is left of the declared length is
+     * refused whole, and nothing of it is written.
+     *
+     * @param data the bytes to write
+     * @throws IllegalArgumentException if data is longer than the field has left
+     * @throws IllegalStateException if no field is open
+     * @throws IOException if an I/O error occurs
+     */
+    public void writeBytesContent(ByteBuffer data) throws IOException {
+        if (!streamOpen) {
+            throw new IllegalStateException("no bytes field open");
+        }
+        int length = data.remaining();
+        if (length > streamRemaining) {
+            throw new IllegalArgumentException("content exceeds declared length");
+        }
+        try {
+            writeToChannel(data);
+        } finally {
+            streamRemaining -= length - data.remaining();
+        }
+    }
+
+    /**
+     * Ends the field begun by {@link #writeStartBytes(int, int)}, after
+     * all of its declared payload has been written.
+     *
+     * @throws IllegalStateException if no field is open, or if less than the
+     *     declared length was written (the field stays open)
+     */
+    public void writeEndBytes() {
+        if (!streamOpen) {
+            throw new IllegalStateException("no bytes field open");
+        }
+        if (streamRemaining != 0) {
+            throw new IllegalStateException(
+                    "bytes field is " + streamRemaining + " bytes short of its declared length");
+        }
+        streamOpen = false;
     }
 
     /**
@@ -506,6 +591,9 @@ public class ProtobufWriter {
     }
 
     private void flushWriteBuffer() throws IOException {
+        if (streamOpen) {
+            throw new IllegalStateException("bytes field open");
+        }
         writeBuffer.flip();
         writeToChannel(writeBuffer);
     }

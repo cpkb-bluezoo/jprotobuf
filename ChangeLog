@@ -1,6 +1,37 @@
 jprotobuf ChangeLog
 ===================
 
+Version 1.2.0 (unreleased)
+--------------------------
+
+Streaming of length-delimited fields. The API change is additive: existing
+handlers and callers are unaffected.
+
+### Added
+
+- Streamed fields. A `ProtobufHandler` can return true from the new
+  `isStreaming(int)` for a bytes, string or packed field, and the parser then
+  reports it as `startBytes(field, length)`, any number of
+  `bytesContent(ByteBuffer)` pieces and `endBytes()` instead of buffering it
+  for `handleBytes`. The input buffer no longer has to hold the field, so
+  a field can be larger than memory. What a handler leaves unconsumed in a
+  piece is offered again at the front of the next, so a foreign parser can be
+  fed straight from the pieces. The new methods are `default`, and a field is
+  streamed only if the handler asks, so no existing handler changes behaviour.
+- `ProtobufWriter.writeStartBytes`, `writeBytesContent` and `writeEndBytes`
+  write a length-delimited field from pieces, with the length declared first as
+  the wire format requires. The output is byte-for-byte what `writeBytesField`
+  writes. Content that does not match the declared length is refused, and no
+  other field can be written while one is open.
+
+### Changed
+
+- `maxLengthDelimitedSize` does not apply to a streamed field, since the parser
+  buffers none of it. A handler that accumulates the content should check the
+  length given to `startBytes`.
+- `isUnderflow()` is also true while a streamed field is incomplete, and
+  `close()` throws if one is.
+
 Version 1.1.1 (2026-10-09)
 --------------------------
 
